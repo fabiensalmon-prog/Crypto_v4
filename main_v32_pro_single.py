@@ -1,17 +1,27 @@
-# HELIOS ONE — V3.3.1 PRO (single-file)
-# One-tap crypto signals · 24+ strats · Ensemble pondéré · HTF + Macro gating
-# Manual only · Portfolio journal (SQLite) · Sélection de trades · TP/SL auto
-# Améliorations : boutons "Prendre ce trade" par ligne, choix prix (suggéré/marché),
-# allocation ou qty fixe, trailing stop ATR, break-even auto, anti-duplicats, stats.
+# HELIOS ONE — V3.4 PRO (single-file)
+# Multi-TP (TP1/TP2/TP3) avec sorties partielles + BE après TP1 (option)
+# Trailing stop ATR + BE auto · Ensemble pondéré · HTF + Macro gating
+# Portfolio SQLite · Boutons "Prendre" · Anti-duplicats · Stats · Backtest · Lab
 
-import os, sqlite3, datetime, requests
-import streamlit as st
+import os, sqlite3, datetime, requests, json
 import pandas as pd
 import numpy as np
+import streamlit as st
 
-st.set_page_config(page_title="HELIOS ONE — V3.3.1 PRO", page_icon="☀️", layout="centered")
-st.title("HELIOS ONE — V3.3.1 PRO")
-st.caption("One-tap crypto signals · 24+ strats · Ensemble pondéré · HTF + Macro gating · Manual only")
+# ────────────────────────────────────────────────────────────────────────────────
+# Page config + icône personnalisée (app_icon.png à la racine du repo)
+# ────────────────────────────────────────────────────────────────────────────────
+ICON = "☀️"
+try:
+    from PIL import Image
+    if os.path.exists("app_icon.png"):
+        ICON = Image.open("app_icon.png")
+except Exception:
+    pass
+
+st.set_page_config(page_title="HELIOS ONE — V3.4 PRO", page_icon=ICON, layout="centered")
+st.title("HELIOS ONE — V3.4 PRO")
+st.caption("One-tap crypto signals · Multi-TP · Trailing/BE · Ensemble pondéré · HTF + Macro")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # External deps
@@ -20,7 +30,6 @@ try:
     import ccxt
 except Exception:
     st.error("❗ ccxt manquant. Ajoute-le dans requirements.txt"); st.stop()
-
 try:
     import yfinance as yf
     HAVE_YF = True
@@ -159,7 +168,7 @@ def sig_heikin_trend(df):
     trend=((ha_close>ha_open).astype(int)-(ha_close<ha_open).astype(int)).rename('signal'); return trend
 def sig_chandelier(df, n=22, mult=3.0):
     a=atr_df(df,n); long_stop=df['high'].rolling(n).max()-mult*a; short_stop=df['low'].rolling(n).min()+mult*a
-    long=(df['close']>long_stop).astype(int); short=-(df['close']<short_stop).astype(int)
+    long=(df['close']>long_stop).astype(int); short=-(df['close']<short_stop)).astype(int)
     return (long+short).clip(-1,1).rename('signal')
 def sig_vwap_mr(df, n=48):
     v=vwap_roll(df,n); return ((df['close']<v*0.985).astype(int) - (df['close']>v*1.015).astype(int)).rename('signal')
@@ -184,35 +193,18 @@ def sig_keltner(df, n=20, mult=2.0):
     return ((close>up).astype(int)-(close<lo).astype(int)).rename('signal')
 def sig_psar(df, af=0.02, max_af=0.2):
     high, low = df['high'], df['low']
-    psar = low.copy()
-    bull = True
-    af_val = af
-    ep = high.iloc[0]
-    psar.iloc[0] = low.iloc[0]
+    psar = low.copy(); bull = True; af_val = af; ep = high.iloc[0]; psar.iloc[0] = low.iloc[0]
     for i in range(2, len(df)):
         prev = psar.iloc[i-1]
         if bull:
             psar.iloc[i] = min(prev + af_val*(ep - prev), low.iloc[i-1], low.iloc[i-2])
-            if high.iloc[i] > ep:
-                ep = high.iloc[i]
-                af_val = min(max_af, af_val + af)
-            if low.iloc[i] < psar.iloc[i]:
-                bull = False
-                psar.iloc[i] = ep
-                ep = low.iloc[i]
-                af_val = af
+            if high.iloc[i] > ep: ep = high.iloc[i]; af_val = min(max_af, af_val + af)
+            if low.iloc[i] < psar.iloc[i]: bull = False; psar.iloc[i] = ep; ep = low.iloc[i]; af_val = af
         else:
             psar.iloc[i] = max(prev + af_val*(ep - prev), high.iloc[i-1], high.iloc[i-2])
-            if low.iloc[i] < ep:
-                ep = low.iloc[i]
-                af_val = min(max_af, af_val + af)
-            if high.iloc[i] > psar.iloc[i]:
-                bull = True
-                psar.iloc[i] = ep
-                ep = high.iloc[i]
-                af_val = af
-    sig = ((df['close'] > psar).astype(int) - (df['close'] < psar).astype(int)).rename('signal')
-    return sig
+            if low.iloc[i] < ep: ep = low.iloc[i]; af_val = min(max_af, af_val + af)
+            if high.iloc[i] > psar.iloc[i]: bull = True; psar.iloc[i] = ep; ep = high.iloc[i]; af_val = af
+    return ((df['close'] > psar).astype(int) - (df['close'] < psar).astype(int)).rename('signal')
 def sig_mfi_mr(df, n=14, lo=20, hi=80):
     tp=(df['high']+df['low']+df['close'])/3; mf=tp*df['volume']
     pos=mf.where(tp>tp.shift(),0.0); neg=mf.where(tp<tp.shift(),0.0).abs()
@@ -332,7 +324,7 @@ def tg(msg:str):
         pass
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Portfolio (SQLite)
+# Portfolio (SQLite) + Multi-TP (meta JSON dans note)
 # ────────────────────────────────────────────────────────────────────────────────
 DB = os.path.join(os.path.dirname(__file__), 'portfolio.db')
 def _init_db():
@@ -351,17 +343,30 @@ def _open_exists(symbol: str, side: str):
     conn.close()
     return row[0] if row else None
 
-def open_position(symbol, side, entry, sl, tp, qty, note=''):
+def _meta_from_note(note:str):
+    if isinstance(note,str) and note.startswith("META:"):
+        try: return json.loads(note[5:])
+        except Exception: return None
+    return None
+def _meta_to_note(meta:dict) -> str:
+    return "META:" + json.dumps(meta, separators=(',',':'))
+
+def _set_meta(pos_id:int, meta:dict):
+    conn=sqlite3.connect(DB)
+    conn.execute('UPDATE positions SET note=? WHERE id=? AND status="OPEN"', (_meta_to_note(meta), int(pos_id)))
+    conn.commit(); conn.close()
+
+def open_position(symbol, side, entry, sl, tp, qty, note='', meta:dict=None):
     _init_db()
     if qty is None or float(qty) <= 0:
         return None
-    # anti-duplicat (même symbole & sens)
     dup = _open_exists(symbol, side)
-    if dup:  # on ignore pour éviter doublons
+    if dup:  # éviter doublons
         return None
+    final_note = _meta_to_note(meta) if isinstance(meta, dict) else (note or '')
     conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute('INSERT INTO positions (open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-              (datetime.datetime.utcnow().isoformat(), None, symbol, side.upper(), float(entry), float(sl), float(tp), float(qty), "OPEN", None, None, note))
+              (datetime.datetime.utcnow().isoformat(), None, symbol, side.upper(), float(entry), float(sl), float(tp), float(qty), "OPEN", None, None, final_note))
     conn.commit(); rid=c.lastrowid; conn.close()
     return rid
 
@@ -372,12 +377,36 @@ def update_sl(pos_id:int, new_sl: float):
 
 def close_position(pos_id:int, exit_price:float, note='CLOSE'):
     _init_db(); conn=sqlite3.connect(DB); c=conn.cursor()
-    row=conn.execute('SELECT side, entry, qty FROM positions WHERE id=? AND status="OPEN"', (pos_id,)).fetchone()
+    row=conn.execute('SELECT symbol, side, entry, sl, tp, qty FROM positions WHERE id=? AND status="OPEN"', (pos_id,)).fetchone()
     if not row: conn.close(); raise ValueError("Position introuvable ou déjà close")
-    side, entry, qty = row
+    symbol, side, entry, sl, tp, qty = row
     pnl=(float(exit_price)-float(entry))*float(qty)*(1 if side.upper()=="LONG" else -1)
     conn.execute('UPDATE positions SET close_ts=?, status=?, exit_price=?, pnl=?, note=? WHERE id=?',
                  (datetime.datetime.utcnow().isoformat(), "CLOSED", float(exit_price), float(pnl), note, pos_id))
+    conn.commit(); conn.close()
+    return pnl
+
+def partial_close(pos_id:int, exit_price:float, qty_to_close:float, reason:str="TP"):
+    """Ferme partiellement: crée une ligne CLOSED pour la portion; réduit la qty de la ligne OPEN."""
+    _init_db(); conn=sqlite3.connect(DB)
+    row=conn.execute('SELECT open_ts, symbol, side, entry, sl, tp, qty FROM positions WHERE id=? AND status="OPEN"', (pos_id,)).fetchone()
+    if not row: conn.close(); return None
+    open_ts, symbol, side, entry, sl, tp, qty = row
+    qty_to_close = float(min(max(qty_to_close, 0.0), qty))
+    if qty_to_close <= 0: conn.close(); return None
+    sign = 1 if side.upper()=="LONG" else -1
+    pnl = (float(exit_price)-float(entry))*qty_to_close*sign
+    # 1) insérer la ligne CLOSED pour la partie
+    conn.execute('INSERT INTO positions (open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                 (open_ts, datetime.datetime.utcnow().isoformat(), symbol, side, float(entry), float(sl), float(tp),
+                  float(qty_to_close), "CLOSED", float(exit_price), float(pnl), reason))
+    # 2) réduire la qty de la ligne OPEN (ou fermer si tout a été vendu)
+    remain = float(qty) - qty_to_close
+    if remain > 1e-12:
+        conn.execute('UPDATE positions SET qty=? WHERE id=? AND status="OPEN"', (remain, pos_id))
+    else:
+        conn.execute('UPDATE positions SET close_ts=?, status=?, exit_price=?, pnl=?, note=? WHERE id=?',
+                     (datetime.datetime.utcnow().isoformat(), "CLOSED", float(exit_price), float(pnl), reason+"(FULL)", pos_id))
     conn.commit(); conn.close()
     return pnl
 
@@ -398,13 +427,32 @@ def save_df(key: str, df: pd.DataFrame):
         st.session_state[key] = df.to_json(orient='split', index=False)
     except Exception:
         st.session_state[key] = None
-
 def load_df(key: str) -> pd.DataFrame:
     js = st.session_state.get(key)
     try:
         return pd.read_json(js, orient='split') if js else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Multi-TP helpers
+# ────────────────────────────────────────────────────────────────────────────────
+def calc_multi_tp(entry: float, tp_final: float, side: str, ratios=(0.5, 0.8, 1.0)):
+    # ratios entre 0 et 1 (TP3=1.0)
+    return [entry + r*(tp_final-entry) for r in ratios]
+
+def build_meta_multi_tp(entry, tp, qty, side, splits, be_after_tp1: bool):
+    # splits: 3 parts (somme approx 1.0). On stocke les targets avec qty absolue pour éviter les ambiguïtés.
+    ratios=(0.5,0.8,1.0)
+    tps = calc_multi_tp(entry, tp, side, ratios)
+    q1, q2, q3 = [float(qty*max(0.0,s)) for s in splits]
+    # ajustement si somme != qty (arrondis) → met tout écart sur TP3
+    diff = float(qty) - (q1+q2+q3)
+    q3 = max(0.0, q3 + diff)
+    targets = [{'name':'TP1','px':tps[0],'qty':q1,'filled':False},
+               {'name':'TP2','px':tps[1],'qty':q2,'filled':False},
+               {'name':'TP3','px':tps[2],'qty':q3,'filled':False}]
+    return {'multi_tp': True, 'targets': targets, 'be_after_tp1': bool(be_after_tp1)}
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Settings (UI)
@@ -455,15 +503,46 @@ with st.expander("Ouvrir / modifier les réglages", expanded=True):
     with colA:
         trail_on = st.toggle("Trailing stop ATR", value=True)
         trail_mult = st.slider("ATR trail (×)", 0.8, 3.0, 1.5, 0.1)
+        multi_tp_on = st.toggle("Activer Multi-TP (TP1/TP2/TP3)", value=True)
     with colB:
-        be_on = st.toggle("Break-even auto", value=True)
-        be_trigger = st.slider("Déclencheur BE (ret_% ≥)", 0.5, 10.0, 2.0, 0.5)
+        be_on = st.toggle("Break-even auto (ret_% ≥)", value=True)
+        be_trigger = st.slider("Seuil BE (%)", 0.5, 10.0, 2.0, 0.5)
+        be_after_tp1 = st.toggle("Mettre SL à BE après TP1", value=True)
+    st.markdown("**Répartition des TP (somme ≈ 100%)**")
+    colS1, colS2, colS3 = st.columns(3)
+    s1 = colS1.number_input("TP1 %", value=50.0, step=5.0)
+    s2 = colS2.number_input("TP2 %", value=30.0, step=5.0)
+    s3 = colS3.number_input("TP3 %", value=20.0, step=5.0)
+    ssum = max(1e-9, s1+s2+s3); splits = (s1/ssum, s2/ssum, s3/ssum)
 
 tabs = st.tabs(['🏠 Top Picks', '📈 Portefeuille', '🧾 Journal', '🧪 Backtest 3Y', '🔬 Lab'])
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Tab 1 — Scanner / sélection
+# Tab 1 — Scanner / sélection + boutons "Prendre"
 # ────────────────────────────────────────────────────────────────────────────────
+def ensemble_weights(df, signals, window=300):
+    if not signals: return pd.Series(dtype=float)
+    start=max(0, len(df)-int(window)); scores={}
+    for name, sig in signals.items():
+        try:
+            _,_,pnl,eq=compute(df.iloc[start:], sig.iloc[start:])
+            scores[name]=_score(pnl,eq)
+        except Exception: scores[name]=-1e9
+    keys=list(scores.keys()); arr=np.array([scores[k] for k in keys], dtype=float)
+    arr=arr-np.nanmax(arr); w=np.exp(arr); w=w/np.nansum(w) if np.nansum(w)!=0 else np.ones_like(w)/len(w)
+    return pd.Series(w, index=keys)
+
+def blended_signal(signals, weights):
+    if not signals: return pd.Series(dtype=float, name="signal")
+    df=pd.concat(signals.values(), axis=1).fillna(0.0); df.columns=list(signals.keys())
+    w=weights.reindex(df.columns).fillna(0.0).values.reshape(1,-1)
+    pos=(df.values*w).sum(axis=1)
+    return pd.Series(pos, index=df.index, name="signal").clip(-1,1)
+
+def htf_gate(df_ltf, df_htf):
+    trend = sig_ema_trend(df_htf).reindex(df_ltf.index).ffill().fillna(0.0)
+    return trend
+
 with tabs[0]:
     st.subheader('Top Picks (1 clic)')
     open_df = list_positions(status='OPEN', limit=500)
@@ -490,7 +569,7 @@ with tabs[0]:
             gate = htf_gate(df, df_htf)
             sig = (sig * gate).clip(-1,1) * macro_mult
             d = int(np.sign(sig.iloc[-1]))
-            if d==0 or (d<0 and not allow_shorts):
+            if d==0 or (d<0 and not allow_shorts): 
                 continue
             lvl = adaptive_levels(df, d, atr_mult_sl=sl_mult, atr_mult_tp=tp_mult)
             if not lvl: continue
@@ -516,7 +595,7 @@ with tabs[0]:
                 picks['alloc_qty'] = 0.0
             save_df("last_picks", picks.dropna(axis=1, how='all'))
             save_df("last_picks_alloc", picks.dropna(axis=1, how='all'))
-            st.success("Scan terminé ✅ — sélectionne ci-dessous.")
+            st.success("Scan terminé ✅ — sélectionne/prends tes trades ci-dessous.")
 
     picks_alloc = load_df("last_picks_alloc")
     if not picks_alloc.empty:
@@ -528,7 +607,6 @@ with tabs[0]:
             st.dataframe(picks_alloc[['symbol','dir','entry','sl','tp','rr','confiance','score','qty','alloc_qty']].round(6),
                          use_container_width=True)
 
-            # ── Choix global d'exécution
             st.markdown("**Exécution**")
             exec_col1, exec_col2 = st.columns(2)
             with exec_col1:
@@ -536,7 +614,6 @@ with tabs[0]:
             with exec_col2:
                 price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"])
 
-            # ── Boutons par trade
             st.markdown("**Prendre un trade (par ligne)**")
             for i, r in picks_alloc.reset_index(drop=True).iterrows():
                 with st.container():
@@ -555,17 +632,18 @@ with tabs[0]:
                         if price_mode == "Prix du marché":
                             try: entry = float(fetch_last_price(exchange, r['symbol']))
                             except Exception: pass
-                        rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q_show, note='TAKEN')
+                        meta = None
+                        if multi_tp_on:
+                            meta = build_meta_multi_tp(entry, float(r['tp']), q_show, r['dir'], splits, be_after_tp1)
+                        rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q_show, note='TAKEN', meta=meta)
                         if rid:
                             st.success(f"Ouvert #{rid} — {r['symbol']} {r['dir']} qty {q_show:.4f} @ {entry:.6f}")
-                            if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q_show:.4f} @ {entry:.6f}")
                         else:
                             st.info("Déjà ouverte (même symbole & sens) ou qty nulle.")
                         st.rerun()
 
-            # ── Sélection multiple (optionnelle)
             st.markdown("---")
-            st.write("**Ou enregistrer plusieurs trades d'un coup :**")
+            st.write("**Enregistrer plusieurs trades d'un coup :**")
             options = [f"{i+1} — {row['symbol']} ({row['dir']}) · RR {row['rr']:.2f} · conf {row['confiance']:.0f}"
                        for i, row in picks_alloc.reset_index(drop=True).iterrows()]
             sel = st.multiselect("Sélection :", options, default=options)
@@ -577,17 +655,16 @@ with tabs[0]:
                     q = float(r.get('alloc_qty', 0.0)) if use_alloc and r.get('alloc_qty',0.0)>0 else float(r['qty'])
                     if q <= 0: continue
                     entry = float(r['entry']) if price_mode=="Suggéré (entry)" else float(fetch_last_price(exchange, r['symbol']))
-                    rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q, note='BATCH')
-                    if rid:
-                        n += 1
-                        if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q:.4f} @ {entry:.6f}")
+                    meta = build_meta_multi_tp(entry, float(r['tp']), q, r['dir'], splits, be_after_tp1) if multi_tp_on else None
+                    rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q, note='BATCH', meta=meta)
+                    if rid: n += 1
                 st.success(f"{n} trade(s) ajouté(s) au portefeuille.")
                 st.rerun()
     else:
         st.info("Clique d’abord sur **Scanner maintenant** pour obtenir des propositions.")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Tab 2 — Portefeuille (suivi, trailing, BE, TP/SL)
+# Tab 2 — Portefeuille (suivi, Multi-TP, trailing, BE, TP/SL)
 # ────────────────────────────────────────────────────────────────────────────────
 with tabs[1]:
     st.subheader('Positions ouvertes')
@@ -614,23 +691,51 @@ with tabs[1]:
         open_df['ret_%'] = open_df.apply(ret_pct, axis=1).round(3)
         open_df['sens'] = np.where(open_df['ret_%']>=0, '✅ OK', '❌ Pas OK')
 
-        st.dataframe(open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','sens']].round(6),
+        st.dataframe(open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','sens','note']].round(6),
                      use_container_width=True)
 
-        # Équity dynamique
         closed_df = list_positions(status='CLOSED', limit=100000)
         realized = 0.0 if closed_df.empty else float(closed_df['pnl'].sum())
         latent_total = float(open_df['PnL_latent'].sum())
         equity = capital + realized + latent_total
         st.metric("Équity dynamique", f"{equity:.2f} USD")
 
-        # ── Mise à jour : trailing / BE / TP/SL
-        if st.button('🔍 Mettre à jour (TP/SL + trailing/BE)'):
+        # ── Mise à jour : Multi-TP (partiels), trailing / BE, TP/SL final
+        if st.button('🔍 Mettre à jour (Multi-TP + TP/SL + trailing/BE)'):
             closed = 0; updated = 0
             for _, r in open_df.iterrows():
-                px = last_prices.get(r['symbol'], r['entry'])
+                px = float(last_prices.get(r['symbol'], r['entry']))
+                meta = _meta_from_note(r['note'])
+                remaining_qty = float(r['qty'])
+
+                # Multi-TP partiels
+                if isinstance(meta, dict) and meta.get('multi_tp'):
+                    changed_meta = False
+                    for i, tgt in enumerate(meta.get('targets', [])):
+                        if tgt.get('filled'): 
+                            continue
+                        hit = (px >= tgt['px']) if r['side']=='LONG' else (px <= tgt['px'])
+                        if hit and remaining_qty > 0:
+                            q_close = float(min(remaining_qty, max(0.0, tgt.get('qty', 0.0))))
+                            if q_close > 0:
+                                pnl = partial_close(int(r['id']), px, q_close, reason=tgt.get('name','TP'))
+                                remaining_qty -= q_close
+                                tgt['filled'] = True
+                                tgt['qty'] = 0.0
+                                changed_meta = True
+                                closed += 1
+                                # BE après TP1 si option
+                                if i == 0 and be_after_tp1:
+                                    new_sl = r['entry']
+                                    if r['side']=='LONG' and new_sl>r['sl']: update_sl(int(r['id']), float(new_sl)); updated += 1
+                                    if r['side']=='SHORT' and new_sl<r['sl']: update_sl(int(r['id']), float(new_sl)); updated += 1
+                    if changed_meta and remaining_qty > 0:
+                        meta['targets'] = meta['targets']  # modifié ci-dessus
+                        _set_meta(int(r['id']), meta)
+
+                # Trailing ATR + BE en % (si position toujours ouverte)
                 try:
-                    if trail_on or be_on:
+                    if remaining_qty > 0 and (trail_on or be_on):
                         df_now = load_or_fetch(exchange, r['symbol'], tf, limit=200)
                         atr_now = float(atr_df(df_now, 14).iloc[-1])
                         new_sl = r['sl']
@@ -646,14 +751,12 @@ with tabs[1]:
                 except Exception:
                     pass
 
-                if r['side'] == 'LONG' and ((px >= r['tp']) or (px <= r['sl'])):
-                    pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
-                    if telegram_on: tg(f"✅ FERMÉ {r['symbol']} LONG · PnL {pnl:.2f}")
-                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed += 1
-                if r['side'] == 'SHORT' and ((px <= r['tp']) or (px >= r['sl'])):
-                    pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
-                    if telegram_on: tg(f"✅ FERMÉ {r['symbol']} SHORT · PnL {pnl:.2f}")
-                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed += 1
+                # TP final/SL (si la ligne OPEN existe encore)
+                if remaining_qty > 0:
+                    if r['side'] == 'LONG' and ((px >= r['tp']) or (px <= r['sl'])):
+                        pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); closed += 1
+                    if r['side'] == 'SHORT' and ((px <= r['tp']) or (px >= r['sl'])):
+                        pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); closed += 1
 
             if updated: st.info(f"SL mis à jour sur {updated} position(s) (BE/Trailing).")
             if closed: st.rerun()
@@ -663,11 +766,10 @@ with tabs[1]:
         for _, r in open_df.iterrows():
             cols = st.columns([3,1,1])
             with cols[0]: st.write(f"{r['symbol']} · {r['side']} — entry {r['entry']:.6f} qty {r['qty']:.4f} · SL {r['sl']:.6f} · TP {r['tp']:.6f}")
-            with cols[1]: mkt = last_prices.get(r['symbol'], r['entry']); st.write(f"⚡ {mkt:.6f}")
+            with cols[1]: mkt = last_prices.get(r['symbol'], r['entry']); st.write(f"⚡ {float(mkt):.6f}")
             with cols[2]:
                 if st.button(f"Clôturer #{int(r['id'])}", key=f"close_{int(r['id'])}"):
                     pnl = close_position(int(r['id']), float(mkt), note='MANUAL')
-                    if telegram_on: tg(f"ℹ️ FERMÉ MANUEL {r['symbol']} {r['side']} · PnL {pnl:.2f}")
                     st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}")
                     st.rerun()
 
