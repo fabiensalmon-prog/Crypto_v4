@@ -703,6 +703,52 @@ with tabs[0]:
         )
         price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
 
+        def _take_one(i, r):
+            # qty choisie dans le tableau, ou calculée via %cap si rempli
+            qty = float(r['qty'])
+            if float(r['pct_cap']) > 0:
+                qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']), 1e-9)
+            if qty <= 0:
+                st.warning("Quantité = 0.")
+                return
+
+            # prix d'entrée selon le mode choisi
+            entry = float(r['entry'])
+            if price_mode == "Prix du marché":
+                entry = float(fetch_last_price(exchange, r['symbol']) or entry)
+
+            # contrôles de caps (par trade, global, cluster)
+            notional = qty * entry
+            scale = 1.0
+            if notional > per_trade_cap:
+                scale = min(scale, per_trade_cap / max(notional, 1e-9))
+            if notional > room:
+                scale = min(scale, room / max(notional, 1e-9))
+
+            cl = symbol_cluster(r['symbol'])
+            cl_now = cluster_now.get(cl, 0.0)
+            if cl_now + notional*scale > cap_cluster_abs:
+                leftover = max(0.0, cap_cluster_abs - cl_now)
+                scale = min(scale, leftover / max(notional, 1e-9))
+
+            qty_eff = qty * max(0.0, scale)
+            if qty_eff <= 0:
+                st.warning("Cap atteint (global/cluster).")
+                return
+
+            # ouvre la position
+            meta = build_meta_r(
+                entry, float(r['sl']), r['dir'], qty_eff,
+                splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
+                trade_mode=mode,
+                top_strats=st.session_state.scan_top.get(i, []),
+                confidence=st.session_state.scan_conf.get(i, 0.0)
+            )
+            open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
+            # maj mémo cluster
+            cluster_now[cl] = cluster_now.get(cl, 0.0) + qty_eff * entry
+        
+
     
         # Boutons par ligne
         st.markdown("##### Actions par trade")
@@ -755,9 +801,14 @@ with tabs[1]:
     if open_df.empty or (open_df['qty']<=1e-12).all():
         st.info("Aucune position.")
     else:
-        open_df = open_df[open_df['qty']>1e-12]
+        # On ne garde que les lignes avec qty>0
+        open_df = open_df[open_df['qty']>1e-12].copy()
+
+        # Derniers prix
         last = {s: fetch_last_price(exchange, s) for s in open_df['symbol'].unique()}
         open_df['last'] = open_df['symbol'].map(last)
+
+        # Perf & PnL latent
         open_df['ret_%'] = (
             (open_df['last']-open_df['entry'])
             .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
@@ -768,12 +819,17 @@ with tabs[1]:
             .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
             * open_df['qty']
         ).round(6)
+
+        # Tableau des positions
         st.dataframe(
             open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
             use_container_width=True
         )
+
+        # Equity dynamique
         st.metric("Équity dynamique", f"{portfolio_equity(capital,last):.2f} USD")
 
+        # Mise à jour auto (TP/SL, BE, trailing, time-stop)
         if st.button("🔄 Mettre à jour (TP/SL + BE/Trailing + Time-stop)"):
             ohlc_map = {s: load_or_fetch(exchange, s, tf, 300) for s in open_df['symbol'].unique()}
             events = auto_manage_positions(
@@ -786,7 +842,7 @@ with tabs[1]:
                 st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
             st.rerun()
 
-        # --- helper prix sécurisé (YF/ccxt peut renvoyer None ou NaN)
+        # --- helper prix sécurisé (si last est None/NaN → on prend l'entry)
         def _safe_px(sym, entry):
             p = last.get(sym, None)
             try:
@@ -797,29 +853,71 @@ with tabs[1]:
                 return float(entry)
 
         st.markdown("### Actions rapides")
-        for _, r in open_df.iterrows():
-            cols = st.columns([3,1.1,1.1,1.1,1.3])
-            cols[0].markdown(f"**{r['symbol']}** · {r['side']} · qty `{r['qty']:.4f}` · SL `{r['sl']:.6f}`")
 
-            if cols[1].button("SL→BE", key=f"be_{r['id']}"):
+        for _, r in open_df.iterrows():
+            # Ligne d'infos + actions rapides
+            c = st.columns([3,1.1,1.1,1.1,1.3])
+            c[0].markdown(f"**{r['symbol']}** · {r['side']} · qty `{float(r['qty']):.4f}` · SL `{float(r['sl']):.6f}`")
+
+            # SL -> BE
+            if c[1].button("SL→BE", key=f"be_{r['id']}"):
                 update_sl(int(r["id"]), float(r["entry"]))
                 st.rerun()
 
-            if cols[2].button("−25%", key=f"m25_{r['id']}"):
+            # Fermer -25%
+            if c[2].button("−25%", key=f"m25_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
                 partial_close(int(r['id']), px, float(r['qty']) * 0.25, "MANUAL_25")
                 st.rerun()
 
-            if cols[3].button("−50%", key=f"m50_{r['id']}"):
+            # Fermer -50%
+            if c[3].button("−50%", key=f"m50_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
                 partial_close(int(r['id']), px, float(r['qty']) * 0.50, "MANUAL_50")
                 st.rerun()
 
-            if cols[4].button("Fermer 100%", key=f"m100_{r['id']}"):
+            # Fermer tout
+            if c[4].button("Fermer 100%", key=f"m100_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
                 close_position(int(r['id']), px, "MANUAL_CLOSE")
                 st.rerun()
 
+            # Ligne 2 : contrôles personnalisés (pour choisir exactement combien fermer)
+            c2 = st.columns([2.2,0.9,1.8,0.9])
+
+            # % à fermer
+            pct_key = f"pct_close_{r['id']}"
+            pct_val = c2[0].slider(
+                f"% à fermer · {r['symbol']}",
+                0.0, 100.0, 0.0, 5.0, key=pct_key
+            )
+            if c2[1].button("Fermer %", key=f"btn_pct_{r['id']}"):
+                q = float(r['qty']) * float(pct_val) / 100.0
+                if q > 0:
+                    px = _safe_px(r['symbol'], r['entry'])
+                    partial_close(int(r['id']), px, q, f"MANUAL_{int(pct_val)}pct")
+                    st.rerun()
+                else:
+                    st.warning("Pourcentage = 0% — rien à faire.")
+
+            # Qty exacte à fermer
+            qty_key = f"qty_close_{r['id']}"
+            max_q = float(r['qty'])
+            step_q = max(max_q/20.0, 1e-6)
+            qty_val = c2[2].number_input(
+                f"Qty à fermer · {r['symbol']}",
+                min_value=0.0, max_value=max_q, value=0.0, step=step_q, key=qty_key, format="%.8f"
+            )
+            if c2[3].button("Fermer qty", key=f"btn_qty_{r['id']}"):
+                q = min(float(qty_val), max_q)
+                if q > 0:
+                    px = _safe_px(r['symbol'], r['entry'])
+                    partial_close(int(r['id']), px, q, "MANUAL_QTY")
+                    st.rerun()
+                else:
+                    st.warning("Quantité = 0 — rien à faire.")
+
+        
 # ───────── 3) Historique
 with tabs[2]:
     st.subheader("Historique (clôturées)")
