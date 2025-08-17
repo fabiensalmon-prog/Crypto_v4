@@ -1,17 +1,12 @@
-# HELIOS ONE — V3.2 PRO (single file)
-# - 20+ stratégies (trend/momentum/mean-reversion/vol/volume)
-# - Ensemble pondéré + gating multi-timeframe (HTF) + macro (VIX/Gold)
-# - Cross-sectional alphas (momentum/volume) pour repondérer les picks
-# - Portefeuille (SQLite), Journal, Auto-allocation, Backtest rapide
-# Déploiement: ce fichier + requirements.txt suffisent
-
+# HELIOS ONE — V3.2.1 PRO (single file)
+# One-tap crypto signals · 20+ strats · HTF + Macro gating · manual only
 import os, sys, sqlite3, datetime, requests, math
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="HELIOS ONE — V3.2 PRO", page_icon="☀️", layout="centered")
-st.title("HELIOS ONE — V3.2 PRO")
+st.set_page_config(page_title="HELIOS ONE — V3.2.1 PRO", page_icon="☀️", layout="centered")
+st.title("HELIOS ONE — V3.2.1 PRO")
 st.caption("One-tap crypto signals · 20+ strats · HTF + Macro gating · manual only")
 
 # ------------------------- Data loading -------------------------
@@ -127,10 +122,10 @@ def sig_ppo(df, fast=12, slow=26, sig=9): emaf=ema(df['close'],fast); emas=ema(d
 def sig_adx_trend(df, n=14, th=20):
     up = df['high'].diff(); down = -df['low'].diff()
     plusDM = np.where((up>down)&(up>0), up, 0.0); minusDM = np.where((down>up)&(down>0), down, 0.0)
-    tr = atr_df(df, n)*(n/(n-1))  # approx
+    tr = atr_df(df, n)*(n/(n-1))
     plusDI = 100*pd.Series(plusDM,index=df.index).ewm(alpha=1/n,adjust=False).mean()/tr
     minusDI = 100*pd.Series(minusDM,index=df.index).ewm(alpha=1/n,adjust=False).mean()/tr
-    dx = 100* ( (plusDI - minusDI).abs() / (plusDI + minusDI + 1e-9) )
+    dx = 100*((plusDI - minusDI).abs() / (plusDI + minusDI + 1e-9))
     adx = dx.ewm(alpha=1/n, adjust=False).mean()
     trend = ((plusDI>minusDI)&(adx>th)).astype(int) - ((minusDI>plusDI)&(adx>th)).astype(int)
     return trend.rename('signal')
@@ -139,7 +134,11 @@ def sig_stoch_rsi(df, n=14, k=3, d=3, lo=0.2, hi=0.8):
     sr = (r - r.rolling(n).min()) / (r.rolling(n).max() - r.rolling(n).min() + 1e-9)
     kf = sr.rolling(k).mean(); df_ = kf.rolling(d).mean()
     return ((kf>df_)&(kf<lo)).astype(int) - ((kf<df_)&(kf>hi)).astype(int)
-def sig_cci_mr(df, n=20): tp=(df['high']+df['low']+df['close'])/3; ma=tp.rolling(n).mean(); md=(tp-tp.rolling(n).mean()).abs().rolling(n).mean(); cci=(tp-ma)/(0.015*md+1e-9); return ((cci<-100).astype(int)-(cci>100).astype(int)).rename('signal')
+def sig_cci_mr(df, n=20):
+    tp=(df['high']+df['low']+df['close'])/3; ma=tp.rolling(n).mean()
+    md=(tp-tp.rolling(n).mean()).abs().rolling(n).mean()
+    cci=(tp-ma)/(0.015*md+1e-9)
+    return ((cci<-100).astype(int)-(cci>100).astype(int)).rename('signal')
 def sig_heikin_trend(df):
     ha_close=(df['open']+df['high']+df['low']+df['close'])/4
     ha_open=ha_close.copy()
@@ -150,10 +149,20 @@ def sig_chandelier(df, n=22, mult=3.0):
     a=atr_df(df,n); long_stop=df['high'].rolling(n).max()-mult*a; short_stop=df['low'].rolling(n).min()+mult*a
     long=(df['close']>long_stop).astype(int); short=-(df['close']<short_stop).astype(int)
     return (long+short).clip(-1,1).rename('signal')
-def sig_vwap_mr(df, n=48): v=vwap_roll(df,n); return ((df['close']<v*0.985).astype(int) - (df['close']>v*1.015).astype(int)).rename('signal')
-def sig_turtle_soup(df, look=20): ll=df['low'].rolling(look).min(); hh=df['high'].rolling(look).max(); long=((df['low']<ll.shift())&(df['close']>df['open'])).astype(int); short=-((df['high']>hh.shift())&(df['close']<df['open'])).astype(int); return (long+short).rename('signal')
-def sig_zscore(df, n=50, k=2.0): z=(df['close']-df['close'].rolling(n).mean())/(df['close'].rolling(n).std()+1e-9); return ((z<-k).astype(int)-(z>k).astype(int)).rename('signal')
-def sig_tsi(df, r=25, s=13): m=df['close'].diff(); a=ema(ema(m,r),s); b=ema(ema(m.abs(),r),s); tsi=100*a/(b+1e-9); sig=ema(tsi,13); return ((tsi>sig).astype(int)-(tsi<sig).astype(int)).rename('signal')
+def sig_vwap_mr(df, n=48):
+    v=vwap_roll(df,n); return ((df['close']<v*0.985).astype(int) - (df['close']>v*1.015).astype(int)).rename('signal')
+def sig_turtle_soup(df, look=20):
+    ll=df['low'].rolling(look).min(); hh=df['high'].rolling(look).max()
+    long=((df['low']<ll.shift())&(df['close']>df['open'])).astype(int)
+    short=-((df['high']>hh.shift())&(df['close']<df['open'])).astype(int)
+    return (long+short).rename('signal')
+def sig_zscore(df, n=50, k=2.0):
+    z=(df['close']-df['close'].rolling(n).mean())/(df['close'].rolling(n).std()+1e-9)
+    return ((z<-k).astype(int)-(z>k).astype(int)).rename('signal')
+def sig_tsi(df, r=25, s=13):
+    m=df['close'].diff(); a=ema(ema(m,r),s); b=ema(ema(m.abs(),r),s)
+    tsi=100*a/(b+1e-9); sig=ema(tsi,13)
+    return ((tsi>sig).astype(int)-(tsi<sig).astype(int)).rename('signal')
 def sig_ema_ribbon(df):
     e=[ema(df['close'],n) for n in (8,13,21,34,55)]
     up=sum([e[i]>e[i+1] for i in range(len(e)-1)]); down=sum([e[i]<e[i+1] for i in range(len(e)-1)])
@@ -169,44 +178,29 @@ def sig_psar(df, af=0.02, max_af=0.2):
         if bull:
             psar.iloc[i]=min(prev + af_val*(ep - prev), low.iloc[i-1], low.iloc[i-2])
             if high.iloc[i]>ep: ep=high.iloc[i]; af_val=min(max_af, af_val+af)
-            if low.iloc[i]<psar.iloc[i]: bull=False; psar.iloc[i]=ep; ep=low.iloc[i]; af_val=af
+            if low.iloc[i]<psar.iloc[i]): bull=False; psar.iloc[i]=ep; ep=low.iloc[i]; af_val=af
         else:
             psar.iloc[i]=max(prev + af_val*(ep - prev), high.iloc[i-1], high.iloc[i-2])
             if low.iloc[i]<ep: ep=low.iloc[i]; af_val=min(max_af, af_val+af)
-            if high.iloc[i]>psar.iloc[i]: bull=True; psar.iloc[i]=ep; ep=high.iloc[i]; af_val=af
+            if high.iloc[i]>psar.iloc[i]): bull=True; psar.iloc[i]=ep; ep=high.iloc[i]; af_val=af
     sig=((df['close']>psar).astype(int)-(df['close']<psar).astype(int)).rename('signal'); return sig
 def sig_mfi_mr(df, n=14, lo=20, hi=80):
-    tp=(df['high']+df['low']+df['close'])/3; mf=tp*df['volume']; pos=mf.where(tp>tp.shift(),0.0); neg=mf.where(tp<tp.shift(),0.0).abs()
+    tp=(df['high']+df['low']+df['close'])/3; mf=tp*df['volume']
+    pos=mf.where(tp>tp.shift(),0.0); neg=mf.where(tp<tp.shift(),0.0).abs()
     mr=100-100/(1+(pos.rolling(n).sum()/(neg.rolling(n).sum()+1e-9)))
     return ((mr<lo).astype(int)-(mr>hi).astype(int)).rename('signal')
 def sig_obv_trend(df, n=20):
-    ch=np.sign(df['close'].diff().fillna(0.0)); obv=(df['volume']*ch).cumsum(); e=ema(obv,n); return ((obv>e).astype(int)-(obv<e).astype(int)).rename('signal')
+    ch=np.sign(df['close'].diff().fillna(0.0)); obv=(df['volume']*ch).cumsum(); e=ema(obv,n)
+    return ((obv>e).astype(int)-(obv<e).astype(int)).rename('signal')
 
 STRATS = {
-    'EMA Trend': sig_ema_trend,
-    'MACD Momentum': sig_macd,
-    'Donchian Breakout': sig_donchian,
-    'SuperTrend': sig_supertrend,
-    'ATR Channel': sig_atr_channel,
-    'Bollinger MR': sig_boll_mr,
-    'Ichimoku': sig_ichimoku,
-    'KAMA Trend': sig_kama_trend,
-    'RSI MR': sig_rsi_mr,
-    'PPO': sig_ppo,
-    'ADX Trend': sig_adx_trend,
-    'StochRSI': sig_stoch_rsi,
-    'CCI MR': sig_cci_mr,
-    'Heikin Trend': sig_heikin_trend,
-    'Chandelier': sig_chandelier,
-    'VWAP MR': sig_vwap_mr,
-    'TurtleSoup': sig_turtle_soup,
-    'ZScore MR': sig_zscore,
-    'TSI Momentum': sig_tsi,
-    'EMA Ribbon': sig_ema_ribbon,
-    'Keltner BO': sig_keltner,
-    'PSAR Trend': sig_psar,
-    'MFI MR': sig_mfi_mr,
-    'OBV Trend': sig_obv_trend,
+    'EMA Trend': sig_ema_trend, 'MACD Momentum': sig_macd, 'Donchian Breakout': sig_donchian,
+    'SuperTrend': sig_supertrend, 'ATR Channel': sig_atr_channel, 'Bollinger MR': sig_boll_mr,
+    'Ichimoku': sig_ichimoku, 'KAMA Trend': sig_kama_trend, 'RSI MR': sig_rsi_mr, 'PPO': sig_ppo,
+    'ADX Trend': sig_adx_trend, 'StochRSI': sig_stoch_rsi, 'CCI MR': sig_cci_mr, 'Heikin Trend': sig_heikin_trend,
+    'Chandelier': sig_chandelier, 'VWAP MR': sig_vwap_mr, 'TurtleSoup': sig_turtle_soup, 'ZScore MR': sig_zscore,
+    'TSI Momentum': sig_tsi, 'EMA Ribbon': sig_ema_ribbon, 'Keltner BO': sig_keltner, 'PSAR Trend': sig_psar,
+    'MFI MR': sig_mfi_mr, 'OBV Trend': sig_obv_trend,
 }
 
 # ------------------------- Ensemble & gating -------------------------
@@ -250,24 +244,23 @@ def blended_signal(signals: dict, weights: pd.Series) -> pd.Series:
     pos=(df.values*w).sum(axis=1)
     return pd.Series(pos, index=df.index, name="signal").clip(-1,1)
 
-# HTF gating: confirme 1h par 4h (ou 4h par 1D)
 def htf_gate(df_ltf: pd.DataFrame, df_htf: pd.DataFrame):
     trend = sig_ema_trend(df_htf).reindex(df_ltf.index).ffill().fillna(0.0)
-    return trend  # -1/0/1
+    return trend
 
-# Macro gating (VIX + Gold)
-def macro_gate(exchange: str):
-    if not HAVE_YF: return 1.0, "no_yf"
+def macro_gate(enable_macro: bool, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thresh=0.10):
+    if not enable_macro: return 1.0, "macro OFF"
+    if not HAVE_YF: return 1.0, "no_yfinance"
     vix = yf_series("^VIX"); gold = yf_series("GC=F")
     if vix is None or vix.empty: return 1.0, "no_vix"
-    lvl = vix.iloc[-1]
+    lvl = float(vix.iloc[-1])
     mult = 1.0; note = []
-    if lvl>28: mult *= 0.0; note.append("VIX>28 (risk-off)")
-    elif lvl>20: mult *= 0.5; note.append("VIX>20 (caution)")
+    if lvl>float(vix_riskoff): mult *= 0.0; note.append(f"VIX>{vix_riskoff} (risk-off)")
+    elif lvl>float(vix_caution): mult *= 0.5; note.append(f"VIX>{vix_caution} (caution)")
     else: note.append("VIX benign")
     if gold is not None and not gold.empty:
-        mom = gold.pct_change(63).iloc[-1]
-        if mom>0.10: mult *= 0.8; note.append("Gold strong (defensive)")
+        mom = float(gold.pct_change(63).iloc[-1])
+        if mom>float(gold_mom_thresh): mult *= 0.8; note.append("Gold strong (defensive)")
     return mult, " | ".join(note)
 
 # Cross-sectional alphas (daily): momentum (63d), volume surge (zscore)
@@ -295,7 +288,7 @@ def cross_alphas(exchange: str, symbols: list):
     out['xalpha'] = 0.7*out['mom63'] + 0.3*out['volz']
     return out
 
-# ------------------------- Risk/positioning helpers -------------------------
+# ------------------------- Risk/positioning -------------------------
 def adaptive_levels(df: pd.DataFrame, direction: int, atr_mult_sl=2.5, atr_mult_tp=3.8):
     if direction==0 or len(df)<2: return None
     a=float(atr_df(df,14).iloc[-1]); price=float(df['close'].iloc[-1])
@@ -361,32 +354,48 @@ def list_positions(status=None, limit=500):
     rows=list(conn.execute(q, params)); conn.close()
     return pd.DataFrame(rows, columns=['id','open_ts','close_ts','symbol','side','entry','sl','tp','qty','status','exit_price','pnl','note'])
 
-# ------------------------- Sidebar -------------------------
+# ------------------------- Settings (on-page) -------------------------
 symbols_default = ['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','LINK/USDT','AVAX/USDT','TON/USDT','DOGE/USDT']
-with st.sidebar:
-    st.subheader('⚙️ Réglages')
-    exchange = st.selectbox('Exchange', ['okx','bybit','kraken','coinbase','kucoin','binance'], index=0)
-    symbols = st.multiselect('Paires', symbols_default, default=symbols_default[:8])
-    tf = st.selectbox('Timeframe', ['15m','1h','4h'], index=1)
-    htf = st.selectbox('HTF (confirmation)', ['1h','4h','1d'], index=2 if tf!='4h' else 1)
-    capital = st.number_input('Capital (USD)', value=1000.0, step=100.0)
 
-    mode = st.selectbox('Mode de risque', ['Conservateur','Balancé','Agressif','Custom'], index=1)
-    presets = {'Conservateur': dict(risk_pct=0.6, max_expo=50.0, min_rr=1.6, max_positions=2),
-               'Balancé':     dict(risk_pct=1.2, max_expo=80.0, min_rr=1.7, max_positions=3),
-               'Agressif':     dict(risk_pct=2.0, max_expo=120.0, min_rr=1.8, max_positions=5),}
-    if mode!='Custom':
-        p=presets[mode]; risk_pct=st.slider('Risque %/trade', 0.1, 5.0, p['risk_pct'], 0.1)
-        max_expo=st.slider('Cap exposition (%)', 10.0, 200.0, p['max_expo'], 1.0)
-        min_rr=st.slider('R/R minimum', 1.0, 5.0, p['min_rr'], 0.1)
-        max_pos=st.slider('Nb max positions', 1, 8, p['max_positions'], 1)
-    else:
-        risk_pct=st.slider('Risque %/trade', 0.1, 5.0, 1.0, 0.1)
-        max_expo=st.slider('Cap exposition (%)', 10.0, 200.0, 80.0, 1.0)
-        min_rr=st.slider('R/R minimum', 1.0, 5.0, 1.7, 0.1)
-        max_pos=st.slider('Nb max positions', 1, 8, 3, 1)
+st.markdown("### ⚙️ Réglages")
+with st.expander("Ouvrir / modifier les réglages", expanded=True):
+    c1, c2 = st.columns(2)
+    with c1:
+        exchange = st.selectbox('Exchange', ['okx','bybit','kraken','coinbase','kucoin','binance'], index=0)
+        tf = st.selectbox('Timeframe', ['15m','1h','4h'], index=1)
+        htf = st.selectbox('HTF (confirmation)', ['1h','4h','1d'], index=2 if tf!='4h' else 1)
+        capital = st.number_input('Capital (USD)', value=1000.0, step=50.0)
+        symbols = st.multiselect('Paires', symbols_default, default=symbols_default[:8])
+    with c2:
+        mode = st.selectbox('Mode de risque', ['Conservateur','Balancé','Agressif','Custom'], index=1)
+        presets = {'Conservateur': dict(risk_pct=0.6, max_expo=50.0, min_rr=1.6, max_positions=2),
+                   'Balancé':     dict(risk_pct=1.2, max_expo=80.0, min_rr=1.7, max_positions=3),
+                   'Agressif':     dict(risk_pct=2.0, max_expo=120.0, min_rr=1.8, max_positions=5),}
+        if mode!='Custom':
+            p=presets[mode]
+            risk_pct=st.slider('Risque %/trade', 0.1, 5.0, p['risk_pct'], 0.1)
+            max_expo=st.slider('Cap exposition (%)', 10.0, 200.0, p['max_expo'], 1.0)
+            min_rr=st.slider('R/R minimum', 1.0, 5.0, p['min_rr'], 0.1)
+            max_pos=st.slider('Nb max positions', 1, 8, p['max_positions'], 1)
+        else:
+            risk_pct=st.slider('Risque %/trade', 0.1, 5.0, 1.0, 0.1)
+            max_expo=st.slider('Cap exposition (%)', 10.0, 200.0, 80.0, 1.0)
+            min_rr=st.slider('R/R minimum', 1.0, 5.0, 1.5, 0.1)
+            max_pos=st.slider('Nb max positions', 1, 8, 3, 1)
+    st.markdown("---")
+    c3, c4 = st.columns(2)
+    with c3:
+        sl_mult = st.slider("SL (×ATR)", 1.0, 4.0, 2.5, 0.1)
+        tp_mult = st.slider("TP (×ATR)", 1.0, 6.0, 3.8, 0.1)
+        allow_shorts = st.toggle("Autoriser les shorts", value=True)
+        active_names = st.multiselect("Stratégies actives", list(STRATS.keys()), default=list(STRATS.keys()))
+    with c4:
+        macro_enabled = st.toggle("Activer macro gating (VIX / Gold)", value=True)
+        vix_caution = st.slider("Seuil VIX prudence", 10.0, 35.0, 20.0, 0.5)
+        vix_riskoff = st.slider("Seuil VIX risk-off", 15.0, 50.0, 28.0, 0.5)
+        gold_mom_thresh = st.slider("Seuil Gold momentum (3m)", 0.0, 0.3, 0.10, 0.01)
 
-tabs = st.tabs(['🏠 Top Picks', '📈 Portefeuille', '🧾 Journal', '🧪 Backtest 3Y'])
+tabs = st.tabs(['🏠 Top Picks', '📈 Portefeuille', '🧾 Journal', '🧪 Backtest 3Y', '🔬 Lab'])
 
 # ------------------------- Tab 1: Top Picks -------------------------
 with tabs[0]:
@@ -397,37 +406,35 @@ with tabs[0]:
     budget_left = max(0.0, cap_allowed - current_expo)
     st.metric('Capital dispo à engager', f"{budget_left:.2f} USD")
 
-    macro_mult, macro_note = macro_gate(exchange)
+    macro_mult, macro_note = macro_gate(macro_enabled, vix_caution, vix_riskoff, gold_mom_thresh)
     st.caption(f"Macro gate: {macro_note} → multiplicateur {macro_mult}")
 
     if st.button('🚀 Scanner maintenant'):
-        xalpha = cross_alphas(exchange, symbols)  # cross-sectional alpha (daily)
-
+        xalpha = cross_alphas(exchange, symbols)
         rows=[]
         for sym in symbols:
             df = load_or_fetch(exchange, sym, tf, limit=2000)
             df_htf = load_or_fetch(exchange, sym, htf, limit=600)
-
-            signals = {name: fn(df) for name, fn in STRATS.items()}
+            use = {name: STRATS[name] for name in active_names if name in STRATS}
+            signals = {name: fn(df) for name, fn in use.items()}
+            if not signals:
+                st.warning("Aucune stratégie active — active au moins une dans les réglages."); break
             w = ensemble_weights(df, signals, window=300)
             sig = blended_signal(signals, w)
-
             gate = htf_gate(df, df_htf)
             sig = (sig * gate).clip(-1,1)
             sig = sig * macro_mult
-
             d = int(np.sign(sig.iloc[-1]))
-            if d==0: continue
-            lvl = adaptive_levels(df, d, atr_mult_sl=2.5, atr_mult_tp=3.8)
+            if d==0 or (d<0 and not allow_shorts): 
+                continue
+            lvl = adaptive_levels(df, d, atr_mult_sl=sl_mult, atr_mult_tp=tp_mult)
             if not lvl: continue
             this_rr = rr(lvl['entry'], lvl['sl'], lvl['tp'])
             if this_rr < min_rr: continue
             qty = size_fixed_pct(capital, lvl['entry'], lvl['sl'], risk_pct)
             conf = confidence(df, sig)
             score = conf * this_rr
-
-            xa = xalpha['xalpha'].get(sym, np.nan) if isinstance(xalpha, pd.DataFrame) and not xalpha.empty else np.nan
-            if not math.isnan(xa): score *= (0.8 + 0.4*xa)  # 0.8..1.2
+            xa = np.nan
             rows.append({'symbol': sym, 'dir':'LONG' if d>0 else 'SHORT', 'entry':lvl['entry'],'sl':lvl['sl'],'tp':lvl['tp'],
                          'rr': this_rr, 'qty': qty, 'confiance': conf, 'score': score, 'xalpha': xa})
 
@@ -439,9 +446,10 @@ with tabs[0]:
 
             def auto_allocate(df, budget):
                 if df.empty or budget<=0: df['alloc_qty']=0.0; return df
-                w=df['score'].clip(lower=0.0); 
+                w=df['score'].clip(lower=0.0)
                 if w.sum()==0: df['alloc_qty']=0.0; return df
-                alloc=(w/w.sum())*budget; df=df.copy(); df['alloc_qty']=alloc/df['entry'].abs().clip(lower=1e-9); return df
+                alloc=(w/w.sum())*budget
+                df=df.copy(); df['alloc_qty']=alloc/df['entry'].abs().clip(lower=1e-9); return df
 
             picks_alloc = auto_allocate(picks, budget_left)
             st.write("Proposition d'allocation (quantités recalculées):")
@@ -452,7 +460,7 @@ with tabs[0]:
                 if st.button('📌 J’ai pris ces trades (qty par défaut)'):
                     for _, r in picks.iterrows():
                         open_position(r['symbol'], r['dir'], float(r['entry']), float(r['sl']), float(r['tp']), float(r['qty']), note='TOPPICK')
-                    st.success(f"{len(picks)} trade(s) ajouté(s)."); tg(f"Ajout manuel: {len(picks)} trades."); st.rerun()
+                    st.success(f"{len(picks)} trade(s) ajouté(s)."); st.rerun()
             with colB:
                 if st.button('⚙️ Allouer automatiquement (budget dispo)'):
                     n=0
@@ -461,7 +469,7 @@ with tabs[0]:
                         if q>0:
                             open_position(r['symbol'], r['dir'], float(r['entry']), float(r['sl']), float(r['tp']), q, note='AUTO_ALLOC')
                             n+=1
-                    st.success(f"Allocation enregistrée sur {n} trade(s)."); tg(f"Allocation auto: {n} trades ouverts."); st.rerun()
+                    st.success(f"Allocation enregistrée sur {n} trade(s)."); st.rerun()
 
 # ------------------------- Tab 2: Portfolio -------------------------
 with tabs[1]:
@@ -486,11 +494,11 @@ with tabs[1]:
             closed=0
             for _, r in open_df.iterrows():
                 px = last_prices.get(r['symbol'], r['entry'])
-                if r['side']=='LONG' and (px>=r['tp'] or px<=r['sl']):
+                if r['side']=='LONG' and (px>=r['tp'] or px<=r['sl']]):
                     pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed+=1
-                if r['side']=='SHORT' and (px<=r['tp'] or px>=r['sl']):
+                if r['side']=='SHORT' and (px<=r['tp'] or px>=r['sl']]):
                     pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed+=1
-            if closed: tg(f"{closed} position(s) clôturée(s) par TP/SL"); st.rerun()
+            if closed: st.rerun()
 
         st.markdown('---')
         st.write('Clôture manuelle :')
@@ -500,7 +508,7 @@ with tabs[1]:
             with cols[1]: mkt = last_prices.get(r['symbol'], r['entry']); st.write(f"⚡ {mkt:.6f}")
             with cols[2]:
                 if st.button(f"Clôturer #{int(r['id'])}", key=f"close_{int(r['id'])}"):
-                    pnl = close_position(int(r['id']), mkt, note='MANUAL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); tg(f"Clôture manuelle #{int(r['id'])}: {pnl:.2f}"); st.rerun()
+                    pnl = close_position(int(r['id']), mkt, note='MANUAL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); st.rerun()
 
 # ------------------------- Tab 3: Journal -------------------------
 with tabs[2]:
@@ -523,3 +531,23 @@ with tabs[3]:
         bt = backtest(df, sig, initial_cash=1.0, fee_bps=2.0, slippage_bps=1.0)
         st.line_chart(pd.Series(bt['equity'], name='Equity (norm.)'))
         st.write({'Sharpe': round(sharpe(bt['pnl']),2), 'MaxDD': round(max_drawdown(bt['equity']),3)})
+
+# ------------------------- Tab 5: Lab -------------------------
+with tabs[4]:
+    st.subheader('Lab — Perfs par stratégie (lookback 300 barres)')
+    sym = st.selectbox('Symbole (Lab)', symbols_default, index=0, key="lab_sym")
+    if st.button('📊 Tester stratégies (Lab)'):
+        df = load_or_fetch(exchange, sym, tf, limit=800)
+        look = 300
+        dfw = df.iloc[-look:]
+        rows=[]
+        for name, fn in STRATS.items():
+            try:
+                sig = fn(dfw)
+                _,_,pnl,eq = compute(dfw, sig)
+                rows.append({'strategie':name, 'Sharpe':sharpe(pnl), 'MaxDD':max_drawdown(eq)})
+            except Exception:
+                rows.append({'strategie':name, 'Sharpe':np.nan, 'MaxDD':np.nan})
+        res = pd.DataFrame(rows).sort_values('Sharpe', ascending=False)
+        st.dataframe(res, use_container_width=True)
+        st.caption("Astuce: active uniquement les stratégies top-Sharpe dans les réglages pour prioriser l'ensemble.")
