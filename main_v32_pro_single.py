@@ -119,7 +119,7 @@ def partial_close(pid, px, qty_close, reason="TP"):
     if not row: conn.close(); return None
     open_ts,symbol,side,entry,sl,tp,qty,note_open=row; meta=_meta_from_note(note_open) or {}
     trade_mode=meta.get('trade_mode','unknown'); top=meta.get('top_strats')
-    qty_close=float(min(max(qty_close,0.0),float(qty))); 
+    qty_close=float(min(max(qty_close,0.0),float(qty)))
     if qty_close<=0: conn.close(); return None
     sign=1 if side.upper()=="LONG" else -1; pnl=(float(px)-float(entry))*qty_close*sign
     c.execute('INSERT INTO positions (open_ts,close_ts,symbol,side,entry,sl,tp,qty,status,exit_price,pnl,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -144,7 +144,7 @@ def _map_symbol(ex: str, symbol: str) -> str:
     return symbol
 
 def fetch_ohlcv_ccxt(exchange_id: str, symbol: str, timeframe='1h', limit=1500) -> pd.DataFrame:
-    ex = build_exchange(exchange_id); 
+    ex = build_exchange(exchange_id)
     if ex is None: raise RuntimeError("ccxt indisponible")
     ex.load_markets()
     data = ex.fetch_ohlcv(_map_symbol(exchange_id, symbol), timeframe=timeframe, limit=limit)
@@ -153,7 +153,7 @@ def fetch_ohlcv_ccxt(exchange_id: str, symbol: str, timeframe='1h', limit=1500) 
 
 def fetch_ohlcv_yf(symbol: str, timeframe='1h', limit=1500) -> pd.DataFrame:
     if not HAVE_YF: raise RuntimeError("yfinance indisponible")
-    t = YF_TICK.get(symbol, None); 
+    t = YF_TICK.get(symbol, None)
     if t is None: raise RuntimeError(f"Pas de mapping YF pour {symbol}")
     period = "730d" if timeframe in ("15m","1h","4h") else "max"
     interval = dict(**{'15m':'15m','1h':'60m','4h':'240m'}).get(timeframe,'60m')
@@ -203,7 +203,7 @@ def kama(series, er_len=10, fast=2, slow=30):
     for i in range(1,len(series)): out.append(out[-1]+sc.iloc[i]*(series.iloc[i]-out[-1]))
     return pd.Series(out,index=series.index)
 
-# … 20+ strats (condensé, même logique que V5.0)
+# … 20+ strats (condensé)
 def s_ema_trend(df): f=ema(df['close'],12); s=ema(df['close'],48); return ((f>s).astype(int)-(f<s).astype(int)).rename('signal')
 def s_macd(df): f=ema(df['close'],12); s=ema(df['close'],26); m=f-s; sg=ema(m,9); return ((m>sg).astype(int)-(m<sg).astype(int)).rename('signal')
 def s_donchian(df,n=55): hh=df['high'].rolling(n).max(); ll=df['low'].rolling(n).min(); return ((df['close']>hh.shift()).astype(int)-(df['close']<ll.shift()).astype(int)).clip(-1,1).rename('signal')
@@ -270,13 +270,13 @@ def s_psar(df, af_step=0.02, af_max=0.2):
     for i in range(1,len(df)):
         prev=float(ps.iloc[i-1])
         if bull:
-            val=prev+af*(ep-prev); val=min(val,float(l.iloc[i-1])); 
+            val=prev+af*(ep-prev); val=min(val,float(l.iloc[i-1]))
             if i>1: val=min(val,float(l.iloc[i-2]))
             if float(h.iloc[i])>ep: ep=float(h.iloc[i]); af=min(af+af_step,af_max)
             if float(l.iloc[i])<val: bull=False; ps.iloc[i]=ep; ep=float(l.iloc[i]); af=af_step
             else: ps.iloc[i]=val
         else:
-            val=prev+af*(ep-prev); val=max(val,float(h.iloc[i-1])); 
+            val=prev+af*(ep-prev); val=max(val,float(h.iloc[i-1]))
             if i>1: val=max(val,float(h.iloc[i-2]))
             if float(l.iloc[i])<ep: ep=float(l.iloc[i]); af=min(af+af_step,af_max)
             if float(h.iloc[i])>val: bull=True; ps.iloc[i]=ep; ep=float(h.iloc[i]); af=af_step
@@ -328,62 +328,30 @@ def blended_signal(signals, weights):
 # ───────── Gates HTF + Macro
 def htf_gate(df_ltf, df_htf): return s_ema_trend(df_htf).reindex(df_ltf.index).ffill().fillna(0.0)
 def yf_series(ticker: str, period="5y"):
-    """
-    Récupère une série 1D (UTC) pour un ticker Yahoo Finance.
-    Gère MultiIndex (plusieurs tickers), absence de 'Adj Close', et fallback sur 'Close'.
-    Retourne None si indisponible.
-    """
     if not HAVE_YF:
         return None
     try:
-        y = yf.download(
-            tickers=ticker,
-            period=period,
-            interval="1d",
-            auto_adjust=False,     # on veut 'Adj Close' si dispo
-            group_by="ticker",     # évite certaines surprises de colonnes
-            progress=False,
-        )
-        if y is None or len(y) == 0:
-            return None
-
-        # Normalisation -> série 1D nommée <ticker>
+        y = yf.download(tickers=ticker, period=period, interval="1d",
+                        auto_adjust=False, group_by="ticker", progress=False)
+        if y is None or len(y) == 0: return None
         s = None
         if isinstance(y.columns, pd.MultiIndex):
-            # Deux schémas possibles: (champ, ticker) ou (ticker, champ)
-            lvl0 = y.columns.get_level_values(0)
-            lvl1 = y.columns.get_level_values(1)
-
-            if "Adj Close" in lvl0:
-                s = y["Adj Close"]
-            elif "Adj Close" in lvl1:
-                s = y.xs("Adj Close", axis=1, level=1)
-            elif "Close" in lvl0:
-                s = y["Close"]
-            elif "Close" in lvl1:
-                s = y.xs("Close", axis=1, level=1)
-
-            if isinstance(s, pd.DataFrame):
-                # Un seul ticker attendu → on prend la 1ère colonne
-                s = s.iloc[:, 0]
+            lvl0 = y.columns.get_level_values(0); lvl1 = y.columns.get_level_values(1)
+            if "Adj Close" in lvl0: s = y["Adj Close"]
+            elif "Adj Close" in lvl1: s = y.xs("Adj Close", axis=1, level=1)
+            elif "Close" in lvl0: s = y["Close"]
+            elif "Close" in lvl1: s = y.xs("Close", axis=1, level=1)
+            if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
         else:
-            # Colonnes simples
             s = y["Adj Close"] if "Adj Close" in y.columns else y.get("Close")
-
-        if s is None or s.empty:
-            return None
-
+        if s is None or s.empty: return None
         s = s.astype(float)
-        # Assure un index datetime UTC
-        try:
-            s.index = pd.to_datetime(s.index, utc=True)
-        except Exception:
-            s.index = pd.to_datetime(s.index).tz_localize("UTC")
-
-        s.name = ticker
-        return s
+        try: s.index = pd.to_datetime(s.index, utc=True)
+        except Exception: s.index = pd.to_datetime(s.index).tz_localize("UTC")
+        s.name = ticker; return s
     except Exception:
         return None
+
 def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
     if not enable: return 1.0, "macro OFF"
     vix=yf_series("^VIX"); gold=yf_series("GC=F")
@@ -485,6 +453,25 @@ def portfolio_equity(base_capital, price_map=None):
             latent+=(px-float(r['entry']))*float(r['qty'])*sign
     return base_capital+realized+latent
 
+# Helper global: équity / engagé / cap / room / cap par trade
+def caps_snapshot_global(m):
+    open_now = list_positions(status='OPEN')
+    engaged_notional = 0.0 if open_now.empty else float((open_now['entry'] * open_now['qty']).sum())
+    eq = portfolio_equity(float(kv_get('base_capital', 1000.0)))
+    cap_max = eq * (m['max_expo'] / 100.0) * m['leverage']
+    room = max(0.0, cap_max - engaged_notional)
+    per_trade_cap = eq * (m['per_trade_cap'] / 100.0)
+    return eq, engaged_notional, cap_max, room, per_trade_cap
+
+def current_cluster_expo():
+    open_now = list_positions(status='OPEN')
+    cluster_now = {}
+    if not open_now.empty:
+        for _,r__ in open_now.iterrows():
+            cl = symbol_cluster(r__['symbol'])
+            cluster_now[cl] = cluster_now.get(cl,0.0) + float(r__['entry']*r__['qty'])
+    return cluster_now
+
 capital = float(kv_get('base_capital',1000.0))
 eq_now = portfolio_equity(capital)
 st.metric("💼 Portefeuille (équity dynamique)", f"{eq_now:.2f} USD")
@@ -537,13 +524,13 @@ def sanitize_all_positions():
         side=str(r['side']).upper(); entry=float(r['entry']); sl=float(r['sl']); new=sl; fix=False
         if side=="LONG" and sl>=entry:  new=entry-max(1e-9,abs(sl-entry)); fix=True
         if side=="SHORT" and sl<=entry: new=entry+max(1e-9,abs(sl-entry)); fix=True
-        if fix: 
+        if fix:
             conn=sqlite3.connect(DB); conn.execute('UPDATE positions SET sl=? WHERE id=?',(float(new),int(r['id']))); conn.commit(); conn.close(); changed=True
     return changed
 
 def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=True, trail_after_tp2=True, fee_buffer_bps=5, time_stop_bars=0, tf_minutes=60):
     sanitize_all_positions()
-    df=list_positions(status='OPEN'); 
+    df=list_positions(status='OPEN')
     if df.empty: return []
     # presets par mode (splits/tpR)
     if str(mode).startswith("Conserv"): parts=(0.50,0.35,0.15); tpsR=(0.9,1.7,2.6)
@@ -558,21 +545,16 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
         if qty<=1e-12: continue
         R=(entry-sl) if side=="LONG" else (sl-entry)
         if R<=0: continue
-        # Targets R
         tps=r_targets(entry,sl,side,tpsR); tp1,tp2,tp3=tps
-        # Hits
         def hit_tp(p,t): return p>=t if side=="LONG" else p<=t
         def hit_sl(p,s): return p<=s if side=="LONG" else p>=s
-        # TP1
         if hit_tp(px,tp1):
             q=qty*parts[0]; partial_close(int(r['id']),px,q,"TP1"); evts.append((sym,"TP1",px,q))
             if be_after_tp1:
                 be_px=entry*(1+(fee_buffer_bps/10000.0)*(1 if side=="LONG" else -1)); update_sl(int(r['id']),be_px)
-            # refresh qty
             cur=list_positions(status='OPEN'); cur=cur[cur['id']==r['id']]
             if cur.empty: continue
             qty=float(cur.iloc[0]['qty'])
-        # TP2
         if qty>0 and hit_tp(px,tp2):
             q=qty*parts[1]; partial_close(int(r['id']),px,q,"TP2"); evts.append((sym,"TP2",px,q))
             if trail_after_tp2 and ohlc_map and sym in ohlc_map:
@@ -583,15 +565,12 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
                     if (side=="LONG" and trail>cur_sl) or (side=="SHORT" and trail<cur_sl): update_sl(int(r['id']),trail)
             cur=list_positions(status='OPEN'); cur=cur[cur['id']==r['id']]
             qty=0.0 if cur.empty else float(cur.iloc[0]['qty'])
-        # TP3
         if qty>0 and hit_tp(px,tp3):
             partial_close(int(r['id']),px,qty,"TP3"); evts.append((sym,"TP3",px,qty)); qty=0.0
-        # SL
         cur=list_positions(status='OPEN'); cur=cur[cur['id']==r['id']]
         if not cur.empty:
             stop=float(cur.iloc[0]['sl']); qty=float(cur.iloc[0]['qty'])
             if qty>0 and hit_sl(px,stop): partial_close(int(r['id']),stop,qty,"SL"); evts.append((sym,"SL",stop,qty)); qty=0.0
-        # Time-stop (optionnel)
         if time_stop_bars and qty>0:
             try: opened=datetime.datetime.fromisoformat(r['open_ts'])
             except Exception: opened=now
@@ -606,33 +585,27 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
 tabs = st.tabs(['🏠 Décision','📈 Portefeuille','🧾 Historique','📊 Analyse','🔬 Lab'])
 
 # ───────── 1) Décision
-# ───────────────────── 1) Décision (persistant & actionnable) ─────────────────────
 with tabs[0]:
     st.subheader("Top Picks (1 clic)")
     mm, macro_note = macro_gate(macro_enabled)
     st.caption(f"Macro: {macro_note} (×{mm}) • Coûts: fee {fee_bps} bps, slip {slip_bps} bps")
 
-    # État persistant pour garder le dernier scan
-    if 'scan_df' not in st.session_state: st.session_state.scan_df = pd.DataFrame()
-    if 'scan_top' not in st.session_state: st.session_state.scan_top = {}   # idx -> top_strats
-    if 'scan_conf' not in st.session_state: st.session_state.scan_conf = {} # idx -> confidence
-
-    # Refresh des caps/expo actuelles
-    def _caps_snapshot():
-        open_now = list_positions(status='OPEN')
-        open_notional = 0.0 if open_now.empty else float((open_now['entry']*open_now['qty']).sum())
-        eq = portfolio_equity(float(kv_get('base_capital',1000.0)))
-        cap_gross = eq*(m['max_expo']/100.0)*m['leverage']
-        room = max(0.0, cap_gross - open_notional)
-        per_trade_cap = eq*(m['per_trade_cap']/100.0)
-        cluster_now={}
-        if not open_now.empty:
-            for _,r__ in open_now.iterrows():
-                cl = symbol_cluster(r__['symbol'])
-                cluster_now[cl] = cluster_now.get(cl,0.0) + float(r__['entry']*r__['qty'])
-        return eq, cap_gross, open_notional, room, per_trade_cap, cluster_now
-    eq, cap_gross, open_notional, room, per_trade_cap, cluster_now = _caps_snapshot()
+    # Métriques d'exposition (globales)
+    eq, engaged_notional, cap_gross, room, per_trade_cap = caps_snapshot_global(m)
     cap_cluster_abs = cap_gross * (cluster_cap_pct/100.0)
+    cluster_now = current_cluster_expo()
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Équity", f"{eq:.2f} USD")
+    m2.metric("Engagé", f"{engaged_notional:.2f} USD")
+    m3.metric("Cap max", f"{cap_gross:.2f} USD")
+    m4.metric("Reste investissable", f"{room:.2f} USD")
+    m5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
+
+    # État persistant
+    if 'scan_df' not in st.session_state: st.session_state.scan_df = pd.DataFrame()
+    if 'scan_top' not in st.session_state: st.session_state.scan_top = {}
+    if 'scan_conf' not in st.session_state: st.session_state.scan_conf = {}
 
     # ---------- SCAN ----------
     if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_active):
@@ -683,9 +656,6 @@ with tabs[0]:
     if picks.empty:
         st.info("Clique d’abord sur **Scanner maintenant**.")
     else:
-        st.caption(f"Expo: {open_notional:.2f} / Cap: {cap_gross:.2f} (lev {m['leverage']}x) → Reste: {room:.2f} · Cap/trade: {per_trade_cap:.2f}")
-        st.caption("Expo cluster: " + (", ".join([f"{k}:{v:.0f}" for k,v in cluster_now.items()]) if cluster_now else "—"))
-
         table = picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
         table.insert(0,'take',True)
         edit = st.data_editor(
@@ -704,7 +674,7 @@ with tabs[0]:
         price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
 
         def _take_one(i, r):
-            # qty choisie dans le tableau, ou calculée via %cap si rempli
+            # qty choisie ou calculée via %cap
             qty = float(r['qty'])
             if float(r['pct_cap']) > 0:
                 qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']), 1e-9)
@@ -712,18 +682,16 @@ with tabs[0]:
                 st.warning("Quantité = 0.")
                 return
 
-            # prix d'entrée selon le mode choisi
+            # prix d'entrée
             entry = float(r['entry'])
             if price_mode == "Prix du marché":
                 entry = float(fetch_last_price(exchange, r['symbol']) or entry)
 
-            # contrôles de caps (par trade, global, cluster)
+            # contrôles cap (par trade / global / cluster)
             notional = qty * entry
             scale = 1.0
-            if notional > per_trade_cap:
-                scale = min(scale, per_trade_cap / max(notional, 1e-9))
-            if notional > room:
-                scale = min(scale, room / max(notional, 1e-9))
+            if notional > per_trade_cap: scale = min(scale, per_trade_cap / max(notional, 1e-9))
+            if notional > room:          scale = min(scale, room / max(notional, 1e-9))
 
             cl = symbol_cluster(r['symbol'])
             cl_now = cluster_now.get(cl, 0.0)
@@ -736,7 +704,6 @@ with tabs[0]:
                 st.warning("Cap atteint (global/cluster).")
                 return
 
-            # ouvre la position
             meta = build_meta_r(
                 entry, float(r['sl']), r['dir'], qty_eff,
                 splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
@@ -745,12 +712,9 @@ with tabs[0]:
                 confidence=st.session_state.scan_conf.get(i, 0.0)
             )
             open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
-            # maj mémo cluster
+            # MAJ expo cluster locale
             cluster_now[cl] = cluster_now.get(cl, 0.0) + qty_eff * entry
-        
 
-    
-        # Boutons par ligne
         st.markdown("##### Actions par trade")
         for i, r in edit.iterrows():
             c1, c2, c3 = st.columns([3,1,1])
@@ -797,18 +761,24 @@ with tabs[0]:
 # ───────── 2) Portefeuille
 with tabs[1]:
     st.subheader("Positions ouvertes")
+
+    # Métriques globales
+    eq, engaged_notional, cap_gross, room, per_trade_cap = caps_snapshot_global(m)
+    cap_cluster_abs = cap_gross * (cluster_cap_pct/100.0)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Équity", f"{eq:.2f} USD")
+    c2.metric("Engagé", f"{engaged_notional:.2f} USD")
+    c3.metric("Cap max", f"{cap_gross:.2f} USD")
+    c4.metric("Reste investissable", f"{room:.2f} USD")
+    c5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
+
     open_df = list_positions(status='OPEN')
     if open_df.empty or (open_df['qty']<=1e-12).all():
         st.info("Aucune position.")
     else:
-        # On ne garde que les lignes avec qty>0
         open_df = open_df[open_df['qty']>1e-12].copy()
-
-        # Derniers prix
         last = {s: fetch_last_price(exchange, s) for s in open_df['symbol'].unique()}
         open_df['last'] = open_df['symbol'].map(last)
-
-        # Perf & PnL latent
         open_df['ret_%'] = (
             (open_df['last']-open_df['entry'])
             .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
@@ -820,14 +790,10 @@ with tabs[1]:
             * open_df['qty']
         ).round(6)
 
-        # Tableau des positions
         st.dataframe(
             open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
             use_container_width=True
         )
-
-        # Equity dynamique
-        st.metric("Équity dynamique", f"{portfolio_equity(capital,last):.2f} USD")
 
         # Mise à jour auto (TP/SL, BE, trailing, time-stop)
         if st.button("🔄 Mettre à jour (TP/SL + BE/Trailing + Time-stop)"):
@@ -842,7 +808,7 @@ with tabs[1]:
                 st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
             st.rerun()
 
-        # --- helper prix sécurisé (si last est None/NaN → on prend l'entry)
+        # Prix sécurisé (si last est None/NaN → on prend l'entry)
         def _safe_px(sym, entry):
             p = last.get(sym, None)
             try:
@@ -852,72 +818,50 @@ with tabs[1]:
             except Exception:
                 return float(entry)
 
-        st.markdown("### Actions rapides")
+        st.markdown("### Actions rapides + Fermeture personnalisée")
 
         for _, r in open_df.iterrows():
-            # Ligne d'infos + actions rapides
             c = st.columns([3,1.1,1.1,1.1,1.3])
             c[0].markdown(f"**{r['symbol']}** · {r['side']} · qty `{float(r['qty']):.4f}` · SL `{float(r['sl']):.6f}`")
 
-            # SL -> BE
             if c[1].button("SL→BE", key=f"be_{r['id']}"):
-                update_sl(int(r["id"]), float(r["entry"]))
-                st.rerun()
+                update_sl(int(r["id"]), float(r["entry"])); st.rerun()
 
-            # Fermer -25%
             if c[2].button("−25%", key=f"m25_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
-                partial_close(int(r['id']), px, float(r['qty']) * 0.25, "MANUAL_25")
-                st.rerun()
+                partial_close(int(r['id']), px, float(r['qty']) * 0.25, "MANUAL_25"); st.rerun()
 
-            # Fermer -50%
             if c[3].button("−50%", key=f"m50_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
-                partial_close(int(r['id']), px, float(r['qty']) * 0.50, "MANUAL_50")
-                st.rerun()
+                partial_close(int(r['id']), px, float(r['qty']) * 0.50, "MANUAL_50"); st.rerun()
 
-            # Fermer tout
             if c[4].button("Fermer 100%", key=f"m100_{r['id']}"):
                 px = _safe_px(r['symbol'], r['entry'])
-                close_position(int(r['id']), px, "MANUAL_CLOSE")
-                st.rerun()
+                close_position(int(r['id']), px, "MANUAL_CLOSE"); st.rerun()
 
-            # Ligne 2 : contrôles personnalisés (pour choisir exactement combien fermer)
+            # Lignes de contrôles perso
             c2 = st.columns([2.2,0.9,1.8,0.9])
-
-            # % à fermer
             pct_key = f"pct_close_{r['id']}"
-            pct_val = c2[0].slider(
-                f"% à fermer · {r['symbol']}",
-                0.0, 100.0, 0.0, 5.0, key=pct_key
-            )
+            pct_val = c2[0].slider(f"% à fermer · {r['symbol']}", 0.0, 100.0, 0.0, 5.0, key=pct_key)
             if c2[1].button("Fermer %", key=f"btn_pct_{r['id']}"):
                 q = float(r['qty']) * float(pct_val) / 100.0
                 if q > 0:
                     px = _safe_px(r['symbol'], r['entry'])
-                    partial_close(int(r['id']), px, q, f"MANUAL_{int(pct_val)}pct")
-                    st.rerun()
+                    partial_close(int(r['id']), px, q, f"MANUAL_{int(pct_val)}pct"); st.rerun()
                 else:
                     st.warning("Pourcentage = 0% — rien à faire.")
 
-            # Qty exacte à fermer
             qty_key = f"qty_close_{r['id']}"
-            max_q = float(r['qty'])
-            step_q = max(max_q/20.0, 1e-6)
-            qty_val = c2[2].number_input(
-                f"Qty à fermer · {r['symbol']}",
-                min_value=0.0, max_value=max_q, value=0.0, step=step_q, key=qty_key, format="%.8f"
-            )
+            max_q = float(r['qty']); step_q = max(max_q/20.0, 1e-6)
+            qty_val = c2[2].number_input(f"Qty à fermer · {r['symbol']}", min_value=0.0, max_value=max_q, value=0.0, step=step_q, key=qty_key, format="%.8f")
             if c2[3].button("Fermer qty", key=f"btn_qty_{r['id']}"):
                 q = min(float(qty_val), max_q)
                 if q > 0:
                     px = _safe_px(r['symbol'], r['entry'])
-                    partial_close(int(r['id']), px, q, "MANUAL_QTY")
-                    st.rerun()
+                    partial_close(int(r['id']), px, q, "MANUAL_QTY"); st.rerun()
                 else:
                     st.warning("Quantité = 0 — rien à faire.")
 
-        
 # ───────── 3) Historique
 with tabs[2]:
     st.subheader("Historique (clôturées)")
@@ -943,8 +887,10 @@ with tabs[2]:
         avgloss=float(hist.loc[hist['pnl']<=0,'pnl'].mean()) if (total-wins)>0 else 0.0
         pf=(avgwin/abs(avgloss)) if avgloss<0 else np.nan
         c1,c2,c3,c4=st.columns(4)
-        c1.metric("P&L réalisé", f"{pnl:.2f}"); c2.metric("Win rate", f"{winrate:.1f}%")
-        c3.metric("Profit factor", f"{pf:.2f}" if not np.isnan(pf) else "—"); c4.metric("Avg win/loss", f"{avgwin:.2f} / {avgloss:.2f}")
+        c1.metric("P&L réalisé", f"{pnl:.2f}")
+        c2.metric("Win rate", f"{winrate:.1f}%")
+        c3.metric("Profit factor", f"{pf:.2f}" if not np.isnan(pf) else "—")
+        c4.metric("Avg win/loss", f"{avgwin:.2f} / {avgloss:.2f}")
 
         st.markdown("#### Perf par mode")
         def agg(dfm):
@@ -963,7 +909,6 @@ with tabs[3]:
     if hist.empty:
         st.info("Pas de données.")
     else:
-        # Equity per mode (réalisé)
         def _mode(n):
             try:
                 if isinstance(n,str) and n.startswith("META2:"): return json.loads(n[6:]).get("mode","unknown")
