@@ -8,6 +8,18 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+ICON_URL = "https://raw.githubusercontent.com/<USER>/<REPO>/main/app_icon.png"
+import streamlit as st
+st.set_page_config(page_title="HELIOS ONE", page_icon=ICON_URL)
+
+# iOS Home Screen icon
+st.markdown(f"""
+<link rel="apple-touch-icon" sizes="180x180" href="{ICON_URL}">
+<link rel="icon" type="image/png" sizes="192x192" href="{ICON_URL}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Helios One">
+""", unsafe_allow_html=True)
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Page config + icône personnalisée (app_icon.png à la racine du repo)
 # ────────────────────────────────────────────────────────────────────────────────
