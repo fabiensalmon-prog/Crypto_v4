@@ -606,157 +606,177 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
 tabs = st.tabs(['🏠 Décision','📈 Portefeuille','🧾 Historique','📊 Analyse','🔬 Lab'])
 
 # ───────── 1) Décision
+# ───────────────────── 1) Décision (persistant & actionnable) ─────────────────────
 with tabs[0]:
     st.subheader("Top Picks (1 clic)")
     mm, macro_note = macro_gate(macro_enabled)
     st.caption(f"Macro: {macro_note} (×{mm}) • Coûts: fee {fee_bps} bps, slip {slip_bps} bps")
 
-    tf_minutes_map={'15m':15,'1h':60,'4h':240}; tf_minutes=tf_minutes_map.get(tf,60)
+    # État persistant pour garder le dernier scan
+    if 'scan_df' not in st.session_state: st.session_state.scan_df = pd.DataFrame()
+    if 'scan_top' not in st.session_state: st.session_state.scan_top = {}   # idx -> top_strats
+    if 'scan_conf' not in st.session_state: st.session_state.scan_conf = {} # idx -> confidence
 
-    btn_disabled = kill_active
-    if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=btn_disabled):
+    # Refresh des caps/expo actuelles
+    def _caps_snapshot():
+        open_now = list_positions(status='OPEN')
+        open_notional = 0.0 if open_now.empty else float((open_now['entry']*open_now['qty']).sum())
+        eq = portfolio_equity(float(kv_get('base_capital',1000.0)))
+        cap_gross = eq*(m['max_expo']/100.0)*m['leverage']
+        room = max(0.0, cap_gross - open_notional)
+        per_trade_cap = eq*(m['per_trade_cap']/100.0)
+        cluster_now={}
+        if not open_now.empty:
+            for _,r__ in open_now.iterrows():
+                cl = symbol_cluster(r__['symbol'])
+                cluster_now[cl] = cluster_now.get(cl,0.0) + float(r__['entry']*r__['qty'])
+        return eq, cap_gross, open_notional, room, per_trade_cap, cluster_now
+    eq, cap_gross, open_notional, room, per_trade_cap, cluster_now = _caps_snapshot()
+    cap_cluster_abs = cap_gross * (cluster_cap_pct/100.0)
+
+    # ---------- SCAN ----------
+    if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_active):
         if kill_active: st.stop()
-        rows=[]
+        rows=[]; tops={}; confs={}
         for sym in symbols:
             try:
-                df = load_or_fetch(exchange, sym, tf, 1200); df_htf = load_or_fetch(exchange, sym, htf, 600)
+                df  = load_or_fetch(exchange, sym, tf, 1200)
+                dfH = load_or_fetch(exchange, sym, htf, 600)
             except Exception as e:
                 st.warning(f"Skip {sym}: {e}"); continue
-            signals = {nm: fn(df) for nm,fn in STRATS.items()}
-            w = ensemble_weights(df, signals, window=300); sig = blended_signal(signals, w)
-            gate = htf_gate(df, df_htf); blended = (sig*gate).clip(-1,1)*mm
-            conf = float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum())
+
+            signals={nm: fn(df) for nm,fn in STRATS.items()}
+            w = ensemble_weights(df, signals, window=300)
+            sig = blended_signal(signals, w)
+            gate = htf_gate(df, dfH)
+            blended = (sig*gate).clip(-1,1)*mm
             if abs(float(blended.iloc[-1])) < m['gate_thr']: continue
+
             d = int(np.sign(blended.iloc[-1])); 
             if d==0: continue
             lvl = atr_levels(df, d, sl_mult, tp_mult)
             if not lvl: continue
-            this_rr = rr(lvl['entry'], lvl['sl'], lvl['tp'])
-            if this_rr < m['min_rr']: continue
-            qty0 = size_fixed_pct(eq_now, lvl['entry'], lvl['sl'], m['risk_pct'])
-            if qty0<=0: continue
+            r_r = rr(lvl['entry'], lvl['sl'], lvl['tp'])
+            if r_r < m['min_rr']: continue
+
+            qty0 = size_fixed_pct(eq, lvl['entry'], lvl['sl'], m['risk_pct'])
+            if qty0 <= 0: continue
             tps = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d>0 else 'SHORT', m['tpR'])
+
             rows.append({
-                'symbol': sym, 'dir':'LONG' if d>0 else 'SHORT',
-                'entry': lvl['entry'], 'sl': lvl['sl'], 'tp': lvl['tp'],
-                'rr': this_rr, 'qty': qty0, 'pct_cap': 0.0,
-                'tp1': tps[0], 'tp2': tps[1], 'tp3': tps[2],
-                'top': [(k, float(v)) for k,v in w.sort_values(ascending=False).head(5).items()],
-                'confidence': conf
+                'symbol':sym,'dir':'LONG' if d>0 else 'SHORT',
+                'entry':lvl['entry'],'sl':lvl['sl'],'tp':lvl['tp'],
+                'tp1':tps[0],'tp2':tps[1],'tp3':tps[2],
+                'rr':r_r,'qty':qty0,'pct_cap':0.0,
+                'confidence': float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum()),
             })
-        if not rows:
-            st.info("Aucun setup selon le mode choisi.")
-        else:
-            picks=pd.DataFrame(rows).sort_values(['confidence','rr'],ascending=False).head(int(m['max_positions']))
-            # Expo/caps
-            open_now=list_positions(status='OPEN')
-            open_notional=0.0 if open_now.empty else float((open_now['entry']*open_now['qty']).sum())
-            eq=portfolio_equity(capital)
-            cap_gross = eq*(m['max_expo']/100.0)*m['leverage']
-            room = max(0.0, cap_gross - open_notional)
-            per_trade_cap = eq*(m['per_trade_cap']/100.0)
-            st.caption(f"Expo: {open_notional:.2f} / Cap: {cap_gross:.2f} (lev {m['leverage']}x) → Reste: {room:.2f} · Cap/trade: {per_trade_cap:.2f}")
-            # Expo cluster actuelle
-            cluster_now={}
-            if not open_now.empty:
-                for _,r in open_now.iterrows():
-                    cl = symbol_cluster(r['symbol'])
-                    cluster_now[cl] = cluster_now.get(cl,0.0) + float(r['entry']*r['qty'])
-            st.caption("Expo par cluster: " + (", ".join([f"{k}:{v:.0f}" for k,v in cluster_now.items()]) if cluster_now else "—"))
+            tops[len(rows)-1]  = [(k,float(v)) for k,v in w.sort_values(ascending=False).head(5).items()]
+            confs[len(rows)-1] = rows[-1]['confidence']
 
-            # Tableau éditable : tu peux cocher, ajuster qty, ou remplir %cap (calcul qty auto)
-            st.markdown("#### Sélection (cocher/ajuster) — **tu peux mettre `%cap`**")
-            picks_display=picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
-            picks_display.insert(0,'take',True)
-            edit=st.data_editor(
-                picks_display, hide_index=True, num_rows="fixed", use_container_width=True,
-                column_config={
-                    "take": st.column_config.CheckboxColumn("Prendre"),
-                    "qty":  st.column_config.NumberColumn("qty (si %cap=0)", step=0.0001, format="%.6f"),
-                    "pct_cap": st.column_config.NumberColumn("%cap (override)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
-                    "rr":   st.column_config.NumberColumn("R/R", format="%.2f", disabled=True),
-                    "confidence": st.column_config.NumberColumn("Confiance", format="%.3f", disabled=True),
-                    "tp1":  st.column_config.NumberColumn("TP1", format="%.6f", disabled=True),
-                    "tp2":  st.column_config.NumberColumn("TP2", format="%.6f", disabled=True),
-                    "tp3":  st.column_config.NumberColumn("TP3", format="%.6f", disabled=True),
-                }
-            )
+        st.session_state.scan_df   = pd.DataFrame(rows).sort_values(['confidence','rr'],ascending=False).head(int(m['max_positions'])).reset_index(drop=True)
+        st.session_state.scan_top  = {i: tops.get(i, []) for i in range(len(st.session_state.scan_df))}
+        st.session_state.scan_conf = {i: confs.get(i, 0.0) for i in range(len(st.session_state.scan_df))}
+        st.rerun()
 
-            cap_cluster_abs = cap_gross * (cluster_cap_pct/100.0)
+    # ---------- AFFICHAGE / ACTION ----------
+    picks = st.session_state.scan_df
+    if picks.empty:
+        st.info("Clique d’abord sur **Scanner maintenant**.")
+    else:
+        st.caption(f"Expo: {open_notional:.2f} / Cap: {cap_gross:.2f} (lev {m['leverage']}x) → Reste: {room:.2f} · Cap/trade: {per_trade_cap:.2f}")
+        st.caption("Expo cluster: " + (", ".join([f"{k}:{v:.0f}" for k,v in cluster_now.items()]) if cluster_now else "—"))
 
-            # Actions par trade (boutons unitaires)
-            st.markdown("##### Actions par trade")
-            for i, r in edit.iterrows():
-                c1,c2,c3 = st.columns([2.6,1,1])
-                c1.write(f"**{r['symbol']}** · {r['dir']} · entry `{r['entry']:.6f}` · SL `{r['sl']:.6f}` · R/R `{r['rr']:.2f}` · conf `{r['confidence']:.3f}` · %cap `{r['pct_cap']:.1f}`")
-                if c2.button("📌 Prendre ce trade", key=f"take_{i}"):
-                    # calcul qty depuis %cap si fourni
-                    qty=float(r['qty'])
-                    if float(r['pct_cap'])>0:
-                        qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']),1e-9)
-                    notional=qty*float(r['entry'])
-                    # caps
-                    scale=1.0
-                    if notional>per_trade_cap: scale=min(scale, per_trade_cap/max(notional,1e-9))
-                    if notional>room:          scale=min(scale, room/max(notional,1e-9))
-                    cl = symbol_cluster(r['symbol']); cl_now = cluster_now.get(cl,0.0)
-                    if cl_now + notional*scale > cap_cluster_abs:
-                        leftover = max(0.0, cap_cluster_abs - cl_now); scale = min(scale, leftover/max(notional,1e-9))
-                    if scale<=0:
-                        st.warning(f"Cap atteint (cluster {cl})."); st.rerun()
-                    entry=float(r['entry']); qty_eff=qty*scale
-                    if qty_eff<=0: st.warning("qty=0"); st.rerun()
-                    meta=build_meta_r(entry,float(r['sl']),r['dir'],qty_eff, splits=m['splits'], tpR=m['tpR'],
-                                      be_after_tp1=True, trade_mode=mode, top_strats=picks.loc[i,'top'], confidence=r['confidence'])
-                    open_position(r['symbol'],r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
-                    cluster_now[cl]=cluster_now.get(cl,0.0) + qty_eff*entry
-                    st.success(f"{r['symbol']} ouvert ✅"); st.rerun()
-                if c3.button("🔬 Lab", key=f"lab_{i}"):
-                    try:
-                        df=load_or_fetch(exchange, r['symbol'], tf, 2000)
-                        bucket=['EMA Trend','MACD','SuperTrend','Bollinger MR','Ichimoku','ADX Trend','OBV Trend']
-                        res=[]
-                        for nm in bucket:
-                            sig=STRATS[nm](df); _,_,p,eq_=compute(df,sig, fee_bps=fee_bps, slip_bps=slip_bps)
-                            res.append(dict(name=nm, sharpe=sharpe(p), mdd=maxdd(eq_), cagr=(eq_.iloc[-1]**(365*24/len(eq_))-1)))
-                        st.info(f"Lab — {r['symbol']} ({tf})"); st.dataframe(pd.DataFrame(res).sort_values("sharpe",ascending=False).round(4), use_container_width=True)
-                    except Exception as e:
-                        st.warning(str(e))
+        table = picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
+        table.insert(0,'take',True)
+        edit = st.data_editor(
+            table, hide_index=True, num_rows="fixed", use_container_width=True,
+            column_config={
+                "take": st.column_config.CheckboxColumn("Prendre"),
+                "qty": st.column_config.NumberColumn("qty (si %cap=0)", step=0.0001, format="%.6f"),
+                "pct_cap": st.column_config.NumberColumn("%cap (override)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
+                "rr": st.column_config.NumberColumn("R/R", format="%.2f", disabled=True),
+                "confidence": st.column_config.NumberColumn("Confiance", format="%.3f", disabled=True),
+                "tp1": st.column_config.NumberColumn("TP1", format="%.6f", disabled=True),
+                "tp2": st.column_config.NumberColumn("TP2", format="%.6f", disabled=True),
+                "tp3": st.column_config.NumberColumn("TP3", format="%.6f", disabled=True),
+            }
+        )
+        price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
 
-            # Actions groupées
-            sel=edit[edit['take']].copy()
-            price_mode=st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"])
-            cA,cB=st.columns(2)
-            if cA.button("📌 Prendre la sélection"):
-                if sel.empty: st.warning("Rien de sélectionné.")
-                else:
-                    # recalcul qty si %cap renseigné
-                    sel = sel.copy()
-                    for idx in sel.index:
-                        if float(sel.loc[idx,'pct_cap'])>0:
-                            sel.loc[idx,'qty'] = (eq * (float(sel.loc[idx,'pct_cap'])/100.0)) / max(float(sel.loc[idx,'entry']),1e-9)
-                    total_alloc=float((sel['qty']*sel['entry']).sum()); scale=1.0
-                    if total_alloc>room: scale=min(scale, room/max(total_alloc,1e-9))
-                    for _,r in sel.iterrows():
-                        entry=float(r['entry']) if price_mode=="Suggéré (entry)" else float(fetch_last_price(exchange,r['symbol']) or r['entry'])
-                        qty=float(r['qty'])*scale; notional=qty*entry
-                        if notional>per_trade_cap: qty*=per_trade_cap/max(notional,1e-9)
-                        cl=symbol_cluster(r['symbol']); cl_now=cluster_now.get(cl,0.0)
-                        if cl_now + qty*entry > cap_cluster_abs:
-                            leftover = max(0.0, cap_cluster_abs - cl_now); qty *= leftover/max(qty*entry,1e-9)
-                        if qty<=0: continue
-                        meta=build_meta_r(entry,float(r['sl']),r['dir'],qty, splits=m['splits'], tpR=m['tpR'],
-                                          be_after_tp1=True, trade_mode=mode, top_strats=picks.loc[picks['symbol']==r['symbol'],'top'].iloc[0], confidence=float(r['confidence']))
-                        open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty, meta=meta)
-                        cluster_now[cl] = cluster_now.get(cl,0.0) + qty*entry
-                    st.success("Ouvert ✅"); st.rerun()
-            if cB.button("🧮 Simuler l’allocation"):
-                tmp=sel.copy()
+        def _take_one(i, r):
+            nonlocal eq, room, cluster_now
+            qty = float(r['qty'])
+            if float(r['pct_cap'])>0:
+                qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']),1e-9)
+            if qty<=0: return st.warning("Quantité = 0.")
+
+            entry = float(r['entry'])
+            if price_mode == "Prix du marché":
+                entry = float(fetch_last_price(exchange, r['symbol']) or entry)
+
+            notional = qty*entry
+            scale = 1.0
+            if notional>per_trade_cap: scale = min(scale, per_trade_cap/max(notional,1e-9))
+            if notional>room:          scale = min(scale, room/max(notional,1e-9))
+            cl = symbol_cluster(r['symbol']); cl_now = cluster_now.get(cl,0.0)
+            if cl_now + notional*scale > cap_cluster_abs:
+                leftover = max(0.0, cap_cluster_abs - cl_now)
+                scale = min(scale, leftover/max(notional,1e-9))
+
+            qty_eff = qty*max(0.0,scale)
+            if qty_eff<=0: return st.warning("Cap atteint (global/cluster).")
+
+            meta = build_meta_r(entry,float(r['sl']),r['dir'],qty_eff,
+                                splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
+                                trade_mode=mode, top_strats=st.session_state.scan_top.get(i,[]),
+                                confidence=st.session_state.scan_conf.get(i,0.0))
+            open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
+            # MAJ des caps en mémoire pour la suite de la session
+            cluster_now[cl] = cluster_now.get(cl,0.0) + qty_eff*entry
+
+        # Boutons par ligne
+        st.markdown("##### Actions par trade")
+        for i, r in edit.iterrows():
+            c1, c2, c3 = st.columns([3,1,1])
+            c1.write(f"**{r['symbol']}** · {r['dir']} · entry `{float(r['entry']):.6f}` · SL `{float(r['sl']):.6f}` · R/R `{float(r['rr']):.2f}` · conf `{float(r['confidence']):.3f}` · %cap `{float(r['pct_cap']):.1f}`")
+            if c2.button("📌 Prendre ce trade", key=f"take_row_{i}"):
+                _take_one(i, r); st.success("Ouvert ✅"); st.rerun()
+            if c3.button("🔬 Lab", key=f"lab_row_{i}"):
+                try:
+                    df=load_or_fetch(exchange, r['symbol'], tf, 2000)
+                    bucket=['EMA Trend','MACD','SuperTrend','Bollinger MR','Ichimoku','ADX Trend','OBV Trend']
+                    res=[]
+                    for nm in bucket:
+                        sig=STRATS[nm](df); _,_,p,eq_=compute(df,sig, fee_bps=fee_bps, slip_bps=slip_bps)
+                        res.append(dict(name=nm, sharpe=sharpe(p), mdd=maxdd(eq_), cagr=(eq_.iloc[-1]**(365*24/len(eq_))-1)))
+                    st.dataframe(pd.DataFrame(res).sort_values("sharpe",ascending=False).round(4), use_container_width=True)
+                except Exception as e:
+                    st.warning(str(e))
+
+        # Actions groupées
+        sel = edit[edit['take']].copy()
+        cA, cB = st.columns(2)
+        if cA.button("📌 Prendre la sélection"):
+            if sel.empty: st.warning("Rien de sélectionné.")
+            else:
+                tmp = sel.copy()
                 for idx in tmp.index:
                     if float(tmp.loc[idx,'pct_cap'])>0:
                         tmp.loc[idx,'qty'] = (eq * (float(tmp.loc[idx,'pct_cap'])/100.0)) / max(float(tmp.loc[idx,'entry']),1e-9)
-                alloc=float((tmp['qty']*tmp['entry']).sum()) if not tmp.empty else 0.0
-                st.info(f"{len(tmp)} trades · Allocation brute {alloc:.2f} USD  \nCap/trade {per_trade_cap:.2f} · Espace cap {room:.2f} · Cap/cluster {cap_cluster_abs:.2f}")
+                total_alloc=float((tmp['qty']*tmp['entry']).sum()); scale_g=1.0
+                if total_alloc>room: scale_g = room/max(total_alloc,1e-9)
+                for i, r in tmp.iterrows():
+                    r = r.copy(); r['qty'] = float(r['qty'])*scale_g
+                    _take_one(i, r)
+                st.success("Trades ouverts ✅"); st.rerun()
+
+        if cB.button("🧮 Simuler l’allocation"):
+            tmp = sel.copy()
+            for idx in tmp.index:
+                if float(tmp.loc[idx,'pct_cap'])>0:
+                    tmp.loc[idx,'qty'] = (eq * (float(tmp.loc[idx,'pct_cap'])/100.0)) / max(float(tmp.loc[idx,'entry']),1e-9)
+            alloc=float((tmp['qty']*tmp['entry']).sum()) if not tmp.empty else 0.0
+            st.info(f"{len(tmp)} trades · Allocation brute {alloc:.2f} USD  \nCap/trade {per_trade_cap:.2f} · Espace cap {room:.2f} · Cap/cluster {cap_cluster_abs:.2f}")
 
 # ───────── 2) Portefeuille
 with tabs[1]:
