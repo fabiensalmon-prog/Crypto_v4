@@ -1,18 +1,16 @@
-# HELIOS ONE — V3.3 PRO (single-file)
+# HELIOS ONE — V3.3.1 PRO (single-file)
 # One-tap crypto signals · 24+ strats · Ensemble pondéré · HTF + Macro gating
 # Manual only · Portfolio journal (SQLite) · Sélection de trades · TP/SL auto
-# Améliorations : trailing stop ATR, break-even auto, anti-duplicats, stats avancées
+# Améliorations : boutons "Prendre ce trade" par ligne, choix prix (suggéré/marché),
+# allocation ou qty fixe, trailing stop ATR, break-even auto, anti-duplicats, stats.
 
 import os, sqlite3, datetime, requests
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ────────────────────────────────────────────────────────────────────────────────
-# App config
-# ────────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="HELIOS ONE — V3.3 PRO", page_icon="☀️", layout="centered")
-st.title("HELIOS ONE — V3.3 PRO")
+st.set_page_config(page_title="HELIOS ONE — V3.3.1 PRO", page_icon="☀️", layout="centered")
+st.title("HELIOS ONE — V3.3.1 PRO")
 st.caption("One-tap crypto signals · 24+ strats · Ensemble pondéré · HTF + Macro gating · Manual only")
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -359,8 +357,8 @@ def open_position(symbol, side, entry, sl, tp, qty, note=''):
         return None
     # anti-duplicat (même symbole & sens)
     dup = _open_exists(symbol, side)
-    if dup:
-        return None  # on ignore silencieusement pour éviter les doublons
+    if dup:  # on ignore pour éviter doublons
+        return None
     conn=sqlite3.connect(DB); c=conn.cursor()
     c.execute('INSERT INTO positions (open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
               (datetime.datetime.utcnow().isoformat(), None, symbol, side.upper(), float(entry), float(sl), float(tp), float(qty), "OPEN", None, None, note))
@@ -492,7 +490,7 @@ with tabs[0]:
             gate = htf_gate(df, df_htf)
             sig = (sig * gate).clip(-1,1) * macro_mult
             d = int(np.sign(sig.iloc[-1]))
-            if d==0 or (d<0 and not allow_shorts): 
+            if d==0 or (d<0 and not allow_shorts):
                 continue
             lvl = adaptive_levels(df, d, atr_mult_sl=sl_mult, atr_mult_tp=tp_mult)
             if not lvl: continue
@@ -510,7 +508,6 @@ with tabs[0]:
             save_df("last_picks", pd.DataFrame()); save_df("last_picks_alloc", pd.DataFrame())
         else:
             picks = (pd.DataFrame(rows).sort_values(['score','confiance','rr'], ascending=False).head(int(max_pos)))
-            # Allocation budget restant
             w = picks['score'].clip(lower=0.0)
             if w.sum() > 0 and budget_left > 0:
                 alloc = (w/w.sum())*budget_left
@@ -530,38 +527,62 @@ with tabs[0]:
             st.write("Résultats :")
             st.dataframe(picks_alloc[['symbol','dir','entry','sl','tp','rr','confiance','score','qty','alloc_qty']].round(6),
                          use_container_width=True)
-            picks_alloc = picks_alloc.reset_index(drop=True)
+
+            # ── Choix global d'exécution
+            st.markdown("**Exécution**")
+            exec_col1, exec_col2 = st.columns(2)
+            with exec_col1:
+                use_alloc = st.toggle("Utiliser l'allocation (alloc_qty)", value=True)
+            with exec_col2:
+                price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"])
+
+            # ── Boutons par trade
+            st.markdown("**Prendre un trade (par ligne)**")
+            for i, r in picks_alloc.reset_index(drop=True).iterrows():
+                with st.container():
+                    cols = st.columns([3,2,2,2,2,2])
+                    cols[0].markdown(f"**{r['symbol']}** · {r['dir']} · RR {r['rr']:.2f} · conf {r['confiance']:.0f}")
+                    cols[1].markdown(f"Entry: `{r['entry']:.6f}`")
+                    cols[2].markdown(f"SL: `{r['sl']:.6f}`")
+                    cols[3].markdown(f"TP: `{r['tp']:.6f}`")
+                    q_show = float(r.get('alloc_qty', 0.0)) if use_alloc and r.get('alloc_qty', 0.0)>0 else float(r['qty'])
+                    cols[4].markdown(f"Qty: **{q_show:.4f}**")
+                    take = cols[5].button("📌 Prendre", key=f"take_{i}")
+                    if take:
+                        if q_show <= 0:
+                            st.warning("Quantité nulle — rien à ouvrir."); st.stop()
+                        entry = float(r['entry'])
+                        if price_mode == "Prix du marché":
+                            try: entry = float(fetch_last_price(exchange, r['symbol']))
+                            except Exception: pass
+                        rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q_show, note='TAKEN')
+                        if rid:
+                            st.success(f"Ouvert #{rid} — {r['symbol']} {r['dir']} qty {q_show:.4f} @ {entry:.6f}")
+                            if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q_show:.4f} @ {entry:.6f}")
+                        else:
+                            st.info("Déjà ouverte (même symbole & sens) ou qty nulle.")
+                        st.rerun()
+
+            # ── Sélection multiple (optionnelle)
+            st.markdown("---")
+            st.write("**Ou enregistrer plusieurs trades d'un coup :**")
             options = [f"{i+1} — {row['symbol']} ({row['dir']}) · RR {row['rr']:.2f} · conf {row['confiance']:.0f}"
-                       for i, row in picks_alloc.iterrows()]
-            default_sel = options
-            sel = st.multiselect("Sélectionne les trades à enregistrer :", options, default=default_sel)
-            colA, colB = st.columns(2)
-            with colA:
-                if st.button('📌 Enregistrer la sélection'):
-                    n = 0
-                    for i, label in enumerate(options):
-                        if label not in sel: continue
-                        r = picks_alloc.iloc[i]
-                        q = float(r.get('alloc_qty', 0.0)) if 'alloc_qty' in r and r['alloc_qty']>0 else float(r['qty'])
-                        if q <= 0: continue
-                        rid = open_position(r['symbol'], r['dir'], float(r['entry']), float(r['sl']), float(r['tp']), q, note='PICK')
-                        if rid:
-                            n += 1
-                            if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q:.4f} entry {r['entry']:.6f}")
-                    st.success(f"{n} trade(s) ajouté(s) au portefeuille.")
-                    st.rerun()
-            with colB:
-                if st.button('⚙️ Enregistrer tout (affiché)'):
-                    n = 0
-                    for _, r in picks_alloc.iterrows():
-                        q = float(r.get('alloc_qty', 0.0)) if 'alloc_qty' in r and r['alloc_qty']>0 else float(r['qty'])
-                        if q <= 0: continue
-                        rid = open_position(r['symbol'], r['dir'], float(r['entry']), float(r['sl']), float(r['tp']), q, note='ALL_VISIBLE')
-                        if rid:
-                            n += 1
-                            if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q:.4f} entry {r['entry']:.6f}")
-                    st.success(f"{n} trade(s) ajouté(s) au portefeuille.")
-                    st.rerun()
+                       for i, row in picks_alloc.reset_index(drop=True).iterrows()]
+            sel = st.multiselect("Sélection :", options, default=options)
+            if st.button('🧺 Enregistrer la sélection'):
+                n = 0
+                for i, label in enumerate(options):
+                    if label not in sel: continue
+                    r = picks_alloc.iloc[i]
+                    q = float(r.get('alloc_qty', 0.0)) if use_alloc and r.get('alloc_qty',0.0)>0 else float(r['qty'])
+                    if q <= 0: continue
+                    entry = float(r['entry']) if price_mode=="Suggéré (entry)" else float(fetch_last_price(exchange, r['symbol']))
+                    rid = open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), q, note='BATCH')
+                    if rid:
+                        n += 1
+                        if telegram_on: tg(f"📌 OUVERT {r['symbol']} {r['dir']} qty {q:.4f} @ {entry:.6f}")
+                st.success(f"{n} trade(s) ajouté(s) au portefeuille.")
+                st.rerun()
     else:
         st.info("Clique d’abord sur **Scanner maintenant** pour obtenir des propositions.")
 
@@ -605,44 +626,34 @@ with tabs[1]:
 
         # ── Mise à jour : trailing / BE / TP/SL
         if st.button('🔍 Mettre à jour (TP/SL + trailing/BE)'):
-            closed = 0
-            updated = 0
+            closed = 0; updated = 0
             for _, r in open_df.iterrows():
                 px = last_prices.get(r['symbol'], r['entry'])
-
-                # Trailing ATR + Break-even (sur la TF choisie)
                 try:
                     if trail_on or be_on:
                         df_now = load_or_fetch(exchange, r['symbol'], tf, limit=200)
                         atr_now = float(atr_df(df_now, 14).iloc[-1])
                         new_sl = r['sl']
-                        # BE : si gain en % ≥ trigger → SL = entry
                         if be_on:
                             rp = 100.0 * (px - r['entry'])/r['entry'] * (1 if r['side']=='LONG' else -1)
                             if rp >= be_trigger:
                                 new_sl = max(new_sl, r['entry']) if r['side']=='LONG' else min(new_sl, r['entry'])
-                        # Trailing ATR
                         if trail_on:
-                            if r['side']=='LONG':
-                                new_sl = max(new_sl, px - trail_mult*atr_now)
-                            else:
-                                new_sl = min(new_sl, px + trail_mult*atr_now)
+                            if r['side']=='LONG': new_sl = max(new_sl, px - trail_mult*atr_now)
+                            else: new_sl = min(new_sl, px + trail_mult*atr_now)
                         if (r['side']=='LONG' and new_sl>r['sl']) or (r['side']=='SHORT' and new_sl<r['sl']):
                             update_sl(int(r['id']), float(new_sl)); updated += 1
                 except Exception:
                     pass
 
-                # Fermeture auto TP/SL
                 if r['side'] == 'LONG' and ((px >= r['tp']) or (px <= r['sl'])):
                     pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
                     if telegram_on: tg(f"✅ FERMÉ {r['symbol']} LONG · PnL {pnl:.2f}")
-                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}")
-                    closed += 1
+                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed += 1
                 if r['side'] == 'SHORT' and ((px <= r['tp']) or (px >= r['sl'])):
                     pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
                     if telegram_on: tg(f"✅ FERMÉ {r['symbol']} SHORT · PnL {pnl:.2f}")
-                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}")
-                    closed += 1
+                    st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed += 1
 
             if updated: st.info(f"SL mis à jour sur {updated} position(s) (BE/Trailing).")
             if closed: st.rerun()
