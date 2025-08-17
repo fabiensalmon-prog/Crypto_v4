@@ -327,11 +327,63 @@ def blended_signal(signals, weights):
 
 # ───────── Gates HTF + Macro
 def htf_gate(df_ltf, df_htf): return s_ema_trend(df_htf).reindex(df_ltf.index).ffill().fillna(0.0)
-def yf_series(ticker:str, period="5y"):
-    if not HAVE_YF: return None
-    y=yf.download(ticker, period=period, interval="1d", progress=False)
-    if y is None or y.empty: return None
-    s=y['Adj Close']; s.index=pd.to_datetime(s.index, utc=True); return s
+def yf_series(ticker: str, period="5y"):
+    """
+    Récupère une série 1D (UTC) pour un ticker Yahoo Finance.
+    Gère MultiIndex (plusieurs tickers), absence de 'Adj Close', et fallback sur 'Close'.
+    Retourne None si indisponible.
+    """
+    if not HAVE_YF:
+        return None
+    try:
+        y = yf.download(
+            tickers=ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=False,     # on veut 'Adj Close' si dispo
+            group_by="ticker",     # évite certaines surprises de colonnes
+            progress=False,
+        )
+        if y is None or len(y) == 0:
+            return None
+
+        # Normalisation -> série 1D nommée <ticker>
+        s = None
+        if isinstance(y.columns, pd.MultiIndex):
+            # Deux schémas possibles: (champ, ticker) ou (ticker, champ)
+            lvl0 = y.columns.get_level_values(0)
+            lvl1 = y.columns.get_level_values(1)
+
+            if "Adj Close" in lvl0:
+                s = y["Adj Close"]
+            elif "Adj Close" in lvl1:
+                s = y.xs("Adj Close", axis=1, level=1)
+            elif "Close" in lvl0:
+                s = y["Close"]
+            elif "Close" in lvl1:
+                s = y.xs("Close", axis=1, level=1)
+
+            if isinstance(s, pd.DataFrame):
+                # Un seul ticker attendu → on prend la 1ère colonne
+                s = s.iloc[:, 0]
+        else:
+            # Colonnes simples
+            s = y["Adj Close"] if "Adj Close" in y.columns else y.get("Close")
+
+        if s is None or s.empty:
+            return None
+
+        s = s.astype(float)
+        # Assure un index datetime UTC
+        try:
+            s.index = pd.to_datetime(s.index, utc=True)
+        except Exception:
+            s.index = pd.to_datetime(s.index).tz_localize("UTC")
+
+        s.name = ticker
+        return s
+    except Exception:
+        return None
 def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
     if not enable: return 1.0, "macro OFF"
     vix=yf_series("^VIX"); gold=yf_series("GC=F")
