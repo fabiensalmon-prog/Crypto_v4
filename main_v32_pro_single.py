@@ -170,19 +170,62 @@ def sig_ema_ribbon(df):
     dn=sum([e[i]<e[i+1] for i in range(len(e)-1)])
     return pd.Series(np.where(up>dn,1,np.where(dn>up,-1,0)),index=df.index,name='signal')
 def sig_keltner(df,n=20,k=2.0): e=ema(df['close'],n); a=atr_df(df,n); up=e+k*a; lo=e-k*a; c=df['close']; return ((c>up).astype(int)-(c<lo).astype(int)).rename('signal')
-def sig_psar(df,af=0.02,max_af=0.2):
-    h,l=df['high'],df['low']; ps=l.copy(); bull=True; a=af; ep=h.iloc[0]; ps.iloc[0]=l.iloc[0]
-    for i in range(2,len(df)):
-        pv=ps.iloc[i-1]
+def sig_psar(df, af_step=0.02, af_max=0.2):
+    """
+    Parabolic SAR propre + signal directionnel:
+    +1 si close > psar, -1 si close < psar, sinon 0.
+    """
+    h = df['high']; l = df['low']; c = df['close']
+    ps = l.copy()
+
+    bull = True
+    af = af_step
+    ep = float(h.iloc[0])      # extreme point
+    ps.iloc[0] = float(l.iloc[0])
+
+    for i in range(1, len(df)):
+        prev = float(ps.iloc[i-1])
+
         if bull:
-            ps.iloc[i]=min(pv+a*(ep-pv), l.iloc[i-1], l.iloc[i-2])
-            if h.iloc[i]>ep: ep=h.iloc[i]; a=min(max_af,a+af)
-            if l.iloc[i]<ps.iloc[i]): bull=False; ps.iloc[i]=ep; ep=l.iloc[i]; a=af
+            # calcule psar haussier
+            ps_val = prev + af * (ep - prev)
+            ps_val = min(ps_val, float(l.iloc[i-1]))
+            if i > 1:
+                ps_val = min(ps_val, float(l.iloc[i-2]))
+            # maj EP/AF
+            if float(h.iloc[i]) > ep:
+                ep = float(h.iloc[i])
+                af = min(af + af_step, af_max)
+            # inversion ?
+            if float(l.iloc[i]) < ps_val:
+                bull = False
+                ps.iloc[i] = ep
+                ep = float(l.iloc[i])
+                af = af_step
+            else:
+                ps.iloc[i] = ps_val
+
         else:
-            ps.iloc[i]=max(pv+a*(ep-pv), h.iloc[i-1], h.iloc[i-2])
-            if l.iloc[i]<ep: ep=l.iloc[i]; a=min(max_af,a+af)
-            if h.iloc[i]>ps.iloc[i]: bull=True; ps.iloc[i]=ep; ep=h.iloc[i]; a=af
-    return ((df['close']>ps).astype(int)-(df['close']<ps).astype(int)).rename('signal')
+            # calcule psar baissier
+            ps_val = prev + af * (ep - prev)
+            ps_val = max(ps_val, float(h.iloc[i-1]))
+            if i > 1:
+                ps_val = max(ps_val, float(h.iloc[i-2]))
+            # maj EP/AF
+            if float(l.iloc[i]) < ep:
+                ep = float(l.iloc[i])
+                af = min(af + af_step, af_max)
+            # inversion ?
+            if float(h.iloc[i]) > ps_val:
+                bull = True
+                ps.iloc[i] = ep
+                ep = float(h.iloc[i])
+                af = af_step
+            else:
+                ps.iloc[i] = ps_val
+
+    signal = np.where(c > ps, 1, np.where(c < ps, -1, 0))
+    return pd.Series(signal, index=df.index, name='signal')
 def sig_mfi_mr(df,n=14,lo=20,hi=80):
     tp=(df['high']+df['low']+df['close'])/3; mf=tp*df['volume']
     pos=mf.where(tp>tp.shift(),0.0); neg=mf.where(tp<tp.shift(),0.0).abs()
