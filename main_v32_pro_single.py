@@ -510,7 +510,8 @@ with tabs[1]:
         equity = capital + realized + latent_total
         st.metric("Équity dynamique", f"{equity:.2f} USD")
 
-        if st.button('🔍 Mettre à jour (TP/SL)'):
+        # --- Mise à jour TP/SL ---
+if st.button('🔍 Mettre à jour (TP/SL)'):
     closed = 0
     for _, r in open_df.iterrows():
         px = last_prices.get(r['symbol'], r['entry'])
