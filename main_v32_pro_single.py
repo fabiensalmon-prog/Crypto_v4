@@ -511,14 +511,24 @@ with tabs[1]:
         st.metric("Équity dynamique", f"{equity:.2f} USD")
 
         if st.button('🔍 Mettre à jour (TP/SL)'):
-            closed=0
-            for _, r in open_df.iterrows():
-                px = last_prices.get(r['symbol'], r['entry'])
-                if r['side']=='LONG' and (px>=r['tp'] or px<=r['sl']]):
-                    pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed+=1
-                if r['side']=='SHORT' and (px<=r['tp'] or px>=r['sl']]):
-                    pnl = close_position(int(r['id']), px, note='AUTO_TP_SL'); st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}"); closed+=1
-            if closed: st.rerun()
+    closed = 0
+    for _, r in open_df.iterrows():
+        px = last_prices.get(r['symbol'], r['entry'])
+
+        # LONG : TP atteint OU SL touché
+        if r['side'] == 'LONG' and ((px >= r['tp']) or (px <= r['sl'])):
+            pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
+            st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}")
+            closed += 1
+
+        # SHORT : TP atteint OU SL touché
+        if r['side'] == 'SHORT' and ((px <= r['tp']) or (px >= r['sl'])):
+            pnl = close_position(int(r['id']), float(px), note='AUTO_TP_SL')
+            st.success(f"Position {int(r['id'])} clôturée. PnL ≈ {pnl:.2f}")
+            closed += 1
+
+    if closed:
+        st.rerun()
 
         st.markdown('---')
         st.write('Clôture manuelle :')
