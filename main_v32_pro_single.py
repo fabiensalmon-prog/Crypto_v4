@@ -703,37 +703,7 @@ with tabs[0]:
         )
         price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
 
-        def _take_one(i, r):
-            nonlocal eq, room, cluster_now
-            qty = float(r['qty'])
-            if float(r['pct_cap'])>0:
-                qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']),1e-9)
-            if qty<=0: return st.warning("Quantité = 0.")
-
-            entry = float(r['entry'])
-            if price_mode == "Prix du marché":
-                entry = float(fetch_last_price(exchange, r['symbol']) or entry)
-
-            notional = qty*entry
-            scale = 1.0
-            if notional>per_trade_cap: scale = min(scale, per_trade_cap/max(notional,1e-9))
-            if notional>room:          scale = min(scale, room/max(notional,1e-9))
-            cl = symbol_cluster(r['symbol']); cl_now = cluster_now.get(cl,0.0)
-            if cl_now + notional*scale > cap_cluster_abs:
-                leftover = max(0.0, cap_cluster_abs - cl_now)
-                scale = min(scale, leftover/max(notional,1e-9))
-
-            qty_eff = qty*max(0.0,scale)
-            if qty_eff<=0: return st.warning("Cap atteint (global/cluster).")
-
-            meta = build_meta_r(entry,float(r['sl']),r['dir'],qty_eff,
-                                splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
-                                trade_mode=mode, top_strats=st.session_state.scan_top.get(i,[]),
-                                confidence=st.session_state.scan_conf.get(i,0.0))
-            open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
-            # MAJ des caps en mémoire pour la suite de la session
-            cluster_now[cl] = cluster_now.get(cl,0.0) + qty_eff*entry
-
+    
         # Boutons par ligne
         st.markdown("##### Actions par trade")
         for i, r in edit.iterrows():
