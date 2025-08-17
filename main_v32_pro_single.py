@@ -167,9 +167,12 @@ def sig_heikin_trend(df):
         ha_open.iloc[i]=(ha_open.iloc[i-1]+ha_close.iloc[i-1])/2
     trend=((ha_close>ha_open).astype(int)-(ha_close<ha_open).astype(int)).rename('signal'); return trend
 def sig_chandelier(df, n=22, mult=3.0):
-    a=atr_df(df,n); long_stop=df['high'].rolling(n).max()-mult*a; short_stop=df['low'].rolling(n).min()+mult*a
-    long=(df['close']>long_stop).astype(int); short=-(df['close']<short_stop)).astype(int)
-    return (long+short).clip(-1,1).rename('signal')
+    a = atr_df(df, n)
+    long_stop  = df['high'].rolling(n).max() - mult * a
+    short_stop = df['low'].rolling(n).min() + mult * a
+    long  = (df['close'] > long_stop).astype(int)
+    short = - (df['close'] < short_stop).astype(int)   # ← parenthèses corrigées
+    return (long + short).clip(-1, 1).rename('signal')
 def sig_vwap_mr(df, n=48):
     v=vwap_roll(df,n); return ((df['close']<v*0.985).astype(int) - (df['close']>v*1.015).astype(int)).rename('signal')
 def sig_turtle_soup(df, look=20):
