@@ -172,18 +172,38 @@ def sig_keltner(df, n=20, mult=2.0):
     return ((close>up).astype(int)-(close<lo).astype(int)).rename('signal')
 def sig_psar(df, af=0.02, max_af=0.2):
     high, low = df['high'], df['low']
-    psar = low.copy(); bull=True; af_val=af; ep=high.iloc[0]
-    for i in range(2,len(df)):
-        prev=psar.iloc[i-1]
+    psar = low.copy()
+    bull = True
+    af_val = af
+    ep = high.iloc[0]
+    psar.iloc[0] = low.iloc[0]
+
+    for i in range(2, len(df)):
+        prev = psar.iloc[i-1]
+
         if bull:
-            psar.iloc[i]=min(prev + af_val*(ep - prev), low.iloc[i-1], low.iloc[i-2])
-            if high.iloc[i]>ep: ep=high.iloc[i]; af_val=min(max_af, af_val+af)
-            if low.iloc[i]<psar.iloc[i]): bull=False; psar.iloc[i]=ep; ep=low.iloc[i]; af_val=af
+            psar.iloc[i] = min(prev + af_val*(ep - prev), low.iloc[i-1], low.iloc[i-2])
+            if high.iloc[i] > ep:
+                ep = high.iloc[i]
+                af_val = min(max_af, af_val + af)
+            if low.iloc[i] < psar.iloc[i]:
+                bull = False
+                psar.iloc[i] = ep
+                ep = low.iloc[i]
+                af_val = af
         else:
-            psar.iloc[i]=max(prev + af_val*(ep - prev), high.iloc[i-1], high.iloc[i-2])
-            if low.iloc[i]<ep: ep=low.iloc[i]; af_val=min(max_af, af_val+af)
-            if high.iloc[i]>psar.iloc[i]): bull=True; psar.iloc[i]=ep; ep=high.iloc[i]; af_val=af
-    sig=((df['close']>psar).astype(int)-(df['close']<psar).astype(int)).rename('signal'); return sig
+            psar.iloc[i] = max(prev + af_val*(ep - prev), high.iloc[i-1], high.iloc[i-2])
+            if low.iloc[i] < ep:
+                ep = low.iloc[i]
+                af_val = min(max_af, af_val + af)
+            if high.iloc[i] > psar.iloc[i]:
+                bull = True
+                psar.iloc[i] = ep
+                ep = high.iloc[i]
+                af_val = af
+
+    sig = ((df['close'] > psar).astype(int) - (df['close'] < psar).astype(int)).rename('signal')
+    return sig
 def sig_mfi_mr(df, n=14, lo=20, hi=80):
     tp=(df['high']+df['low']+df['close'])/3; mf=tp*df['volume']
     pos=mf.where(tp>tp.shift(),0.0); neg=mf.where(tp<tp.shift(),0.0).abs()
