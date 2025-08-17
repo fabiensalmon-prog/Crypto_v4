@@ -751,36 +751,74 @@ with tabs[0]:
 # ───────── 2) Portefeuille
 with tabs[1]:
     st.subheader("Positions ouvertes")
-    open_df=list_positions(status='OPEN')
+    open_df = list_positions(status='OPEN')
     if open_df.empty or (open_df['qty']<=1e-12).all():
         st.info("Aucune position.")
     else:
-        open_df=open_df[open_df['qty']>1e-12]
-        last={s:fetch_last_price(exchange,s) for s in open_df['symbol'].unique()}
-        open_df['last']=open_df['symbol'].map(last)
-        open_df['ret_%']=((open_df['last']-open_df['entry']).where(open_df['side']=='LONG', open_df['entry']-open_df['last'])/open_df['entry']*100).round(3)
-        open_df['PnL_latent']=((open_df['last']-open_df['entry']).where(open_df['side']=='LONG', open_df['entry']-open_df['last'])*open_df['qty']).round(6)
-        st.dataframe(open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']], use_container_width=True)
+        open_df = open_df[open_df['qty']>1e-12]
+        last = {s: fetch_last_price(exchange, s) for s in open_df['symbol'].unique()}
+        open_df['last'] = open_df['symbol'].map(last)
+        open_df['ret_%'] = (
+            (open_df['last']-open_df['entry'])
+            .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
+            / open_df['entry'] * 100
+        ).round(3)
+        open_df['PnL_latent'] = (
+            (open_df['last']-open_df['entry'])
+            .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
+            * open_df['qty']
+        ).round(6)
+        st.dataframe(
+            open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
+            use_container_width=True
+        )
         st.metric("Équity dynamique", f"{portfolio_equity(capital,last):.2f} USD")
 
         if st.button("🔄 Mettre à jour (TP/SL + BE/Trailing + Time-stop)"):
-            ohlc_map={s:load_or_fetch(exchange,s,tf,300) for s in open_df['symbol'].unique()}
-            events=auto_manage_positions(last, ohlc_map, mode=mode, be_after_tp1=True, trail_after_tp2=True,
-                                        fee_buffer_bps=fee_bps+slip_bps, time_stop_bars=time_stop_bars, tf_minutes={'15m':15,'1h':60,'4h':240}.get(tf,60))
-            for sym,why,px,q in events: st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
+            ohlc_map = {s: load_or_fetch(exchange, s, tf, 300) for s in open_df['symbol'].unique()}
+            events = auto_manage_positions(
+                last, ohlc_map, mode=mode, be_after_tp1=True, trail_after_tp2=True,
+                fee_buffer_bps=fee_bps+slip_bps,
+                time_stop_bars=time_stop_bars,
+                tf_minutes={'15m':15,'1h':60,'4h':240}.get(tf,60)
+            )
+            for sym, why, px, q in events:
+                st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
             st.rerun()
 
+        # --- helper prix sécurisé (YF/ccxt peut renvoyer None ou NaN)
+        def _safe_px(sym, entry):
+            p = last.get(sym, None)
+            try:
+                if p is None or (isinstance(p, float) and math.isnan(p)):
+                    return float(entry)
+                return float(p)
+            except Exception:
+                return float(entry)
+
         st.markdown("### Actions rapides")
-        for _,r in open_df.iterrows():
-            cols=st.columns([3,1.1,1.1,1.1,1.3])
+        for _, r in open_df.iterrows():
+            cols = st.columns([3,1.1,1.1,1.1,1.3])
             cols[0].markdown(f"**{r['symbol']}** · {r['side']} · qty `{r['qty']:.4f}` · SL `{r['sl']:.6f}`")
-            if cols[1].button("SL→BE", key=f"be_{r['id']}"): update_sl(int(r["id"]),float(r["entry"])); st.rerun()
+
+            if cols[1].button("SL→BE", key=f"be_{r['id']}"):
+                update_sl(int(r["id"]), float(r["entry"]))
+                st.rerun()
+
             if cols[2].button("−25%", key=f"m25_{r['id']}"):
-                px=last.get(r['symbol'],r['entry']); partial_close(int(r['id']),float(px),float(r['qty'])*0.25,"MANUAL_25"); st.rerun()
+                px = _safe_px(r['symbol'], r['entry'])
+                partial_close(int(r['id']), px, float(r['qty']) * 0.25, "MANUAL_25")
+                st.rerun()
+
             if cols[3].button("−50%", key=f"m50_{r['id']}"):
-                px=last.get(r['symbol'],r['entry']); partial_close(int(r['id']),float(px),float(r['qty'])*0.50,"MANUAL_50"); st.rerun()
+                px = _safe_px(r['symbol'], r['entry'])
+                partial_close(int(r['id']), px, float(r['qty']) * 0.50, "MANUAL_50")
+                st.rerun()
+
             if cols[4].button("Fermer 100%", key=f"m100_{r['id']}"):
-                px=last.get(r['symbol'],r['entry']); close_position(int(r['id']),float(px),"MANUAL_CLOSE"); st.rerun()
+                px = _safe_px(r['symbol'], r['entry'])
+                close_position(int(r['id']), px, "MANUAL_CLOSE")
+                st.rerun()
 
 # ───────── 3) Historique
 with tabs[2]:
