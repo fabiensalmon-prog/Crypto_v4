@@ -425,8 +425,34 @@ def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
     if lvl>vix_riskoff: mult=0.0; note.append("risk-off")
     elif lvl>vix_caution: mult=0.5; note.append("caution")
     else: note.append("benign")
-    if gold is not None and not empty(gold := gold):  # py<=3.8 compat fine: simple check below
-        pass
+    def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
+    if not enable:
+        return 1.0, "macro OFF"
+
+    vix  = yf_series("^VIX")
+    gold = yf_series("GC=F")
+
+    if vix is None or vix.empty:
+        return 1.0, "no_vix"
+
+    lvl  = float(vix.iloc[-1])
+    mult = 1.0
+    note = []
+
+    if lvl > vix_riskoff:
+        mult = 0.0; note.append("risk-off")
+    elif lvl > vix_caution:
+        mult = 0.5; note.append("caution")
+    else:
+        note.append("benign")
+
+    if gold is not None and not gold.empty:
+        mom = float(gold.pct_change(63).iloc[-1])
+        if mom > gold_mom_thr:
+            mult *= 0.8
+            note.append("gold↑")
+
+    return mult, " | ".join(note)
     # (version robuste sans walrus:)
     if gold is not None and not gold.empty:
         mom=float(gold.pct_change(63).iloc[-1])
