@@ -118,10 +118,10 @@ def partial_close(pid, px, qty_close, reason="TP"):
     row=c.execute('SELECT open_ts,symbol,side,entry,sl,tp,qty,note FROM positions WHERE id=? AND status="OPEN"',(pid,)).fetchone()
     if not row: conn.close(); return None
     open_ts,symbol,side,entry,sl,tp,qty,note_open=row; meta=_meta_from_note(note_open) or {}
-    trade_mode=meta.get('trade_mode','unknown'); top=meta.get('top_strats')
     qty_close=float(min(max(qty_close,0.0),float(qty)))
     if qty_close<=0: conn.close(); return None
     sign=1 if side.upper()=="LONG" else -1; pnl=(float(px)-float(entry))*qty_close*sign
+    trade_mode=meta.get('trade_mode','unknown'); top=meta.get('top_strats')
     c.execute('INSERT INTO positions (open_ts,close_ts,symbol,side,entry,sl,tp,qty,status,exit_price,pnl,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
               (open_ts,datetime.datetime.utcnow().isoformat(),symbol,side,float(entry),float(sl),float(tp),float(qty_close),"CLOSED",float(px),float(pnl),
                "META2:"+json.dumps({"mode":trade_mode,"reason":reason,"top":top},separators=(',',':'))))
@@ -360,6 +360,9 @@ def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
     if lvl>vix_riskoff: mult=0.0; note.append("risk-off")
     elif lvl>vix_caution: mult=0.5; note.append("caution")
     else: note.append("benign")
+    if gold is not None and not empty(gold := gold):  # py<=3.8 compat fine: simple check below
+        pass
+    # (version robuste sans walrus:)
     if gold is not None and not gold.empty:
         mom=float(gold.pct_change(63).iloc[-1])
         if mom>gold_mom_thr: mult*=0.8; note.append("gold↑")
@@ -442,7 +445,7 @@ def suggest_mode():
 s_mode, s_reason, s_macro = suggest_mode()
 st.info(f"💡 Suggestion de mode: **{s_mode}** — {s_reason} · Macro: {s_macro}")
 
-# ───────── Equity / kill-switch
+# ───────── Equity / kill-switch + helpers
 def portfolio_equity(base_capital, price_map=None):
     open_df=list_positions(status='OPEN'); closed_df=list_positions(status='CLOSED')
     realized=0.0 if closed_df.empty else float(closed_df['pnl'].sum()); latent=0.0
@@ -453,7 +456,6 @@ def portfolio_equity(base_capital, price_map=None):
             latent+=(px-float(r['entry']))*float(r['qty'])*sign
     return base_capital+realized+latent
 
-# Helper global: équity / engagé / cap / room / cap par trade
 def caps_snapshot_global(m):
     open_now = list_positions(status='OPEN')
     engaged_notional = 0.0 if open_now.empty else float((open_now['entry'] * open_now['qty']).sum())
@@ -532,7 +534,6 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
     sanitize_all_positions()
     df=list_positions(status='OPEN')
     if df.empty: return []
-    # presets par mode (splits/tpR)
     if str(mode).startswith("Conserv"): parts=(0.50,0.35,0.15); tpsR=(0.9,1.7,2.6)
     elif str(mode).startswith("Agressif") and "Super" not in str(mode): parts=(0.30,0.40,0.30); tpsR=(1.0,2.5,5.0)
     elif "Super" in str(mode): parts=(0.34,0.33,0.33); tpsR=(1.2,3.0,6.0)
@@ -601,6 +602,10 @@ with tabs[0]:
     m3.metric("Cap max", f"{cap_gross:.2f} USD")
     m4.metric("Reste investissable", f"{room:.2f} USD")
     m5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
+    liquid = max(0.0, eq - engaged_notional)
+    st.caption(f"Liquidité (équity − engagé) : **{liquid:.2f} USD**")
+    if cluster_now:
+        st.caption("Expo cluster : " + ", ".join([f"{k}: {v:.0f}" for k,v in cluster_now.items()]))
 
     # État persistant
     if 'scan_df' not in st.session_state: st.session_state.scan_df = pd.DataFrame()
@@ -673,8 +678,46 @@ with tabs[0]:
         )
         price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
 
+        # --- Prévisualisation du room après CE trade (sans l’ouvrir)
+        def _preview_one(r, eq, per_trade_cap, room, cap_cluster_abs, cluster_now):
+            qty = float(r['qty'])
+            if float(r['pct_cap']) > 0:
+                qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']), 1e-9)
+            if qty <= 0:
+                cl = symbol_cluster(r['symbol'])
+                return dict(qty_eff=0.0, notional=0.0, room_after=room,
+                            cl=cl, cl_room_after=max(0.0, cap_cluster_abs - cluster_now.get(cl,0.0)),
+                            capped=False)
+
+            entry = float(r['entry'])
+            if price_mode == "Prix du marché":
+                entry = float(fetch_last_price(exchange, r['symbol']) or entry)
+
+            notional = qty * entry
+            scale = 1.0
+            if notional > per_trade_cap:
+                scale = min(scale, per_trade_cap / max(notional, 1e-9))
+            if notional > room:
+                scale = min(scale, room / max(notional, 1e-9))
+
+            cl = symbol_cluster(r['symbol'])
+            cl_now = cluster_now.get(cl, 0.0)
+            if cl_now + notional*scale > cap_cluster_abs:
+                leftover = max(0.0, cap_cluster_abs - cl_now)
+                scale = min(scale, leftover / max(notional, 1e-9))
+
+            qty_eff = qty * max(0.0, scale)
+            notional_eff = qty_eff * entry
+            return dict(
+                qty_eff=qty_eff,
+                notional=notional_eff,
+                room_after=max(0.0, room - notional_eff),
+                cl=cl,
+                cl_room_after=max(0.0, cap_cluster_abs - (cl_now + notional_eff)),
+                capped=(scale < 1.0)
+            )
+
         def _take_one(i, r):
-            # qty choisie ou calculée via %cap
             qty = float(r['qty'])
             if float(r['pct_cap']) > 0:
                 qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']), 1e-9)
@@ -682,12 +725,10 @@ with tabs[0]:
                 st.warning("Quantité = 0.")
                 return
 
-            # prix d'entrée
             entry = float(r['entry'])
             if price_mode == "Prix du marché":
                 entry = float(fetch_last_price(exchange, r['symbol']) or entry)
 
-            # contrôles cap (par trade / global / cluster)
             notional = qty * entry
             scale = 1.0
             if notional > per_trade_cap: scale = min(scale, per_trade_cap / max(notional, 1e-9))
@@ -712,13 +753,21 @@ with tabs[0]:
                 confidence=st.session_state.scan_conf.get(i, 0.0)
             )
             open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
-            # MAJ expo cluster locale
             cluster_now[cl] = cluster_now.get(cl, 0.0) + qty_eff * entry
 
         st.markdown("##### Actions par trade")
         for i, r in edit.iterrows():
             c1, c2, c3 = st.columns([3,1,1])
-            c1.write(f"**{r['symbol']}** · {r['dir']} · entry `{float(r['entry']):.6f}` · SL `{float(r['sl']):.6f}` · R/R `{float(r['rr']):.2f}` · conf `{float(r['confidence']):.3f}` · %cap `{float(r['pct_cap']):.1f}`")
+            # preview live avant les boutons
+            pv = _preview_one(r, eq, per_trade_cap, room, cap_cluster_abs, cluster_now)
+            c1.write(
+                f"**{r['symbol']}** · {r['dir']} · entry `{float(r['entry']):.6f}` · SL `{float(r['sl']):.6f}` · "
+                f"R/R `{float(r['rr']):.2f}` · conf `{float(r['confidence']):.3f}` · %cap `{float(r['pct_cap']):.1f}`"
+            )
+            c1.caption(
+                f"Prévu → notional {pv['notional']:.2f} · reste {pv['room_after']:.2f} · "
+                f"cluster {pv['cl']} dispo {pv['cl_room_after']:.2f}" + (" · cap limité" if pv['capped'] else "")
+            )
             if c2.button("📌 Prendre ce trade", key=f"take_row_{i}"):
                 _take_one(i, r); st.success("Ouvert ✅"); st.rerun()
             if c3.button("🔬 Lab", key=f"lab_row_{i}"):
@@ -771,14 +820,28 @@ with tabs[1]:
     c3.metric("Cap max", f"{cap_gross:.2f} USD")
     c4.metric("Reste investissable", f"{room:.2f} USD")
     c5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
+    liquid2 = max(0.0, eq - engaged_notional)
+    st.caption(f"Liquidité (équity − engagé) : **{liquid2:.2f} USD**")
 
     open_df = list_positions(status='OPEN')
     if open_df.empty or (open_df['qty']<=1e-12).all():
         st.info("Aucune position.")
     else:
         open_df = open_df[open_df['qty']>1e-12].copy()
+
+        # Derniers prix + fallback sécurisé sur entry si NaN/None
         last = {s: fetch_last_price(exchange, s) for s in open_df['symbol'].unique()}
         open_df['last'] = open_df['symbol'].map(last)
+        mask = ~np.isfinite(open_df['last'])
+        open_df.loc[mask, 'last'] = open_df.loc[mask, 'entry']
+
+        # Indicateur "bon sens" (↗︎ si LONG & last>entry, ↘︎ si SHORT & last<entry)
+        open_df['↗︎/↘︎'] = np.where(
+            ((open_df['side']=='LONG') & (open_df['last']>open_df['entry'])) |
+            ((open_df['side']=='SHORT') & (open_df['last']<open_df['entry'])),
+            "✅ ↗︎", "❌ ↘︎"
+        )
+
         open_df['ret_%'] = (
             (open_df['last']-open_df['entry'])
             .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
@@ -791,7 +854,7 @@ with tabs[1]:
         ).round(6)
 
         st.dataframe(
-            open_df[['id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
+            open_df[['↗︎/↘︎','id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
             use_container_width=True
         )
 
@@ -808,7 +871,7 @@ with tabs[1]:
                 st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
             st.rerun()
 
-        # Prix sécurisé (si last est None/NaN → on prend l'entry)
+        # Prix sécurisé pour actions manuelles
         def _safe_px(sym, entry):
             p = last.get(sym, None)
             try:
