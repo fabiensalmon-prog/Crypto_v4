@@ -819,6 +819,48 @@ if picks.empty:
                     if c_for[1].button(f"⚠️ Forcer {r0['symbol']}", key=f"force_{j}"):
                         _take_one(j, r0)  # ouvre malgré la raison
                         st.success("Ouvert (forcé) ✅"); st.rerun()
+
+    # --- Fallback spécial Agressif : proposer les meilleurs "borderline" et pouvoir les forcer
+if picks.empty and "Agressif" in mode:
+    rej = st.session_state.get('scan_rejects', [])
+    if rej:
+        st.info("Agressif : je te propose les meilleurs candidats recalés (tu peux les FORCER).")
+        rej_df = pd.DataFrame(rej).copy()
+
+        # on ne garde que ceux pour lesquels on a des niveaux calculés
+        rej_df = rej_df[np.isfinite(rej_df['entry']) & np.isfinite(rej_df['sl']) & np.isfinite(rej_df['tp'])]
+
+        # top 5 en |blended|
+        rej_df = rej_df.reindex(rej_df['blended'].abs().sort_values(ascending=False).index).head(5)
+
+        for j, r0 in rej_df.iterrows():
+            # qty de secours si qty0==0
+            q = float(r0.get('qty', 0.0))
+            if q <= 0:
+                q = size_fixed_pct(eq, float(r0['entry']), float(r0['sl']), m['risk_pct'])
+
+            # R/R de secours si NaN
+            rr_val = r0['rr']
+            if not np.isfinite(rr_val):
+                rr_val = rr(float(r0['entry']), float(r0['sl']), float(r0['tp']))
+
+            # objet au même format que ton tableau "edit"
+            rtake = {
+                'symbol': r0['symbol'], 'dir': r0['dir'], 'entry': float(r0['entry']),
+                'sl': float(r0['sl']), 'tp': float(r0['tp']),
+                'tp1': float(r0['tp1']), 'tp2': float(r0['tp2']), 'tp3': float(r0['tp3']),
+                'rr': float(rr_val), 'qty': float(q), 'pct_cap': 0.0,
+                'confidence': float(r0.get('confidence', 0.0))
+            }
+
+            cols = st.columns([3,1])
+            cols[0].markdown(
+                f"**{rtake['symbol']}** · {rtake['dir']} · raison `{r0['reason']}` · "
+                f"blended `{float(r0['blended']):.3f}` · R/R `{rtake['rr']:.2f}`"
+            )
+            if cols[1].button(f"⚠️ Forcer {rtake['symbol']}", key=f"force_ag_{j}"):
+                _take_one(j, rtake)   # réutilise ta fonction d’ouverture
+                st.success("Ouvert (forcé) ✅"); st.rerun()
     else:
         table = picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
         table.insert(0,'take',True)
