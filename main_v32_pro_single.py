@@ -57,82 +57,147 @@ EX_COST = {
     'binance': {'fee_bps': 8,  'slip_bps': 3},
 }
 
-# ───────── DB (SQLite)
-DB = os.path.join(os.path.dirname(__file__), 'portfolio.db')
-def _init_db():
-    conn=sqlite3.connect(DB); c=conn.cursor()
+# ───────── DB (SQLite) — robust path + auto-pick + backup/merge
+import shutil
+
+# Dossier data stable (persistance)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+DATA_DIR = os.path.join(os.path.expanduser("~"), ".helios_one")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _count_rows(db_path):
+    try:
+        if not db_path or not os.path.exists(db_path):
+            return (0, 0, 0)  # open, closed, total
+        conn = sqlite3.connect(db_path); c = conn.cursor()
+        # positions peut ne pas exister si DB vide
+        try:
+            open_n   = c.execute("SELECT COUNT(*) FROM positions WHERE status='OPEN'").fetchone()[0]
+            closed_n = c.execute("SELECT COUNT(*) FROM positions WHERE status='CLOSED'").fetchone()[0]
+            tot_n    = c.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+        except Exception:
+            open_n=closed_n=tot_n=0
+        conn.close()
+        return (int(open_n), int(closed_n), int(tot_n))
+    except Exception:
+        return (0, 0, 0)
+
+def _best_existing_db():
+    cand = []
+    # 1) DB à côté du script
+    cand.append(os.path.join(BASE_DIR, "portfolio.db"))
+    # 2) DB perso stable
+    cand.append(os.path.join(DATA_DIR, "portfolio.db"))
+    # 3) DB passée via variable d'environnement (optionnel)
+    env_db = os.environ.get("HELIOS_DB", "").strip()
+    if env_db:
+        cand.append(env_db)
+
+    scored = []
+    for p in cand:
+        if p and os.path.exists(p):
+            o, c, t = _count_rows(p)
+            scored.append((p, t))
+    if not scored:
+        # rien trouvé → on utilisera la DB stable dans DATA_DIR
+        return os.path.join(DATA_DIR, "portfolio.db")
+
+    # prend celle avec le plus de lignes
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[0][0]
+
+def _ensure_db_ready(db_path):
+    # initialise tables si absentes
+    conn = sqlite3.connect(db_path); c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS positions (
       id INTEGER PRIMARY KEY AUTOINCREMENT, open_ts TEXT, close_ts TEXT, symbol TEXT, side TEXT,
       entry REAL, sl REAL, tp REAL, qty REAL, status TEXT, exit_price REAL, pnl REAL, note TEXT)''')
-    c.execute('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)'); conn.commit(); conn.close()
+    c.execute('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)')
+    conn.commit(); conn.close()
+
+def _backup_db(db_path):
+    try:
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        dest = os.path.join(DATA_DIR, f"portfolio_backup_{ts}.db")
+        shutil.copyfile(db_path, dest)
+        return dest
+    except Exception:
+        return None
+
+def _merge_db_bytes(target_db_path, uploaded_bytes):
+    # écrit un tmp puis ATTACH + INSERT (sans la colonne id → autoincrément)
+    tmp_path = os.path.join(DATA_DIR, "import_tmp.db")
+    with open(tmp_path, "wb") as f:
+        f.write(uploaded_bytes)
+    _ensure_db_ready(target_db_path)
+    _ensure_db_ready(tmp_path)
+
+    # sauvegarde avant merge
+    _backup_db(target_db_path)
+
+    conn = sqlite3.connect(target_db_path)
+    try:
+        tmp_q = tmp_path.replace("'", "''")
+        conn.execute(f"ATTACH DATABASE '{tmp_q}' AS src")
+        # s’assure que la table existe côté src
+        try:
+            has = conn.execute("SELECT COUNT(*) FROM src.sqlite_master WHERE type='table' AND name='positions'").fetchone()[0]
+        except Exception:
+            has = 0
+        if has == 0:
+            conn.execute("DETACH DATABASE src")
+            return 0
+
+        # merge des positions (on ne copie PAS l'id pour éviter conflits)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO positions (open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note)
+            SELECT open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note
+            FROM src.positions
+        """)
+        added = cur.rowcount if cur.rowcount is not None else 0
+        conn.commit()
+        conn.execute("DETACH DATABASE src")
+        return int(added)
+    finally:
+        conn.close()
+        try: os.remove(tmp_path)
+        except Exception: pass
+
+# Choix/standardisation de la DB
+BEST = _best_existing_db()
+STABLE = os.path.join(DATA_DIR, "portfolio.db")
+if os.path.abspath(BEST) != os.path.abspath(STABLE):
+    try:
+        # si STABLE est vide ou plus petite → on copie la meilleure dessus
+        _, _, tot_best = _count_rows(BEST)
+        _, _, tot_stab = _count_rows(STABLE)
+        if (not os.path.exists(STABLE)) or (tot_best > tot_stab):
+            shutil.copyfile(BEST, STABLE)
+    except Exception:
+        pass
+
+DB = STABLE
+_ensure_db_ready(DB)
+
+def _init_db():  # garde la signature originale utilisée plus bas
+    _ensure_db_ready(DB)
+
 def kv_get(k, default=None):
     _init_db(); conn=sqlite3.connect(DB)
     r=conn.execute('SELECT v FROM kv WHERE k=?',(k,)).fetchone(); conn.close()
     return json.loads(r[0]) if r else default
+
 def kv_set(k,v):
     _init_db(); conn=sqlite3.connect(DB)
     conn.execute('INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)',(k,json.dumps(v))); conn.commit(); conn.close()
+
 def list_positions(status=None,limit=999999):
     _init_db(); conn=sqlite3.connect(DB)
     q='SELECT id,open_ts,close_ts,symbol,side,entry,sl,tp,qty,status,exit_price,pnl,note FROM positions'; pr=()
     if status in("OPEN","CLOSED"): q+=' WHERE status=?'; pr=(status,)
     q+=' ORDER BY id DESC LIMIT ?'; pr=pr+(int(limit),); rows=list(conn.execute(q,pr)); conn.close()
     return pd.DataFrame(rows,columns=['id','open_ts','close_ts','symbol','side','entry','sl','tp','qty','status','exit_price','pnl','note'])
-
-def _meta_from_note(note):
-    if isinstance(note,str) and note.startswith("META:"):
-        try: return json.loads(note[5:])
-        except Exception: return None
-    return None
-def _meta_to_note(meta): return "META:"+json.dumps(meta, separators=(',',':'))
-
-def open_position(symbol, side, entry, sl, tp, qty, meta=None):
-    _init_db()
-    if qty is None or float(qty)<=0: return None
-    if side.upper()=="LONG" and sl>=entry:  sl=entry-max(1e-9,abs(sl-entry))
-    if side.upper()=="SHORT" and sl<=entry: sl=entry+max(1e-9,abs(sl-entry))
-    note=_meta_to_note(meta) if isinstance(meta,dict) else ''
-    conn=sqlite3.connect(DB); c=conn.cursor()
-    c.execute('INSERT INTO positions (open_ts,close_ts,symbol,side,entry,sl,tp,qty,status,exit_price,pnl,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-              (datetime.datetime.utcnow().isoformat(),None,symbol,side.upper(),float(entry),float(sl),float(tp),float(qty),"OPEN",None,None,note))
-    conn.commit(); rid=c.lastrowid; conn.close(); return rid
-
-def update_sl(pid,new_sl):
-    _init_db(); conn=sqlite3.connect(DB)
-    conn.execute('UPDATE positions SET sl=? WHERE id=? AND status="OPEN"',(float(new_sl),int(pid))); conn.commit(); conn.close()
-
-def close_position(pid, px, note='CLOSE'):
-    _init_db(); conn=sqlite3.connect(DB); c=conn.cursor()
-    row=c.execute('SELECT open_ts,symbol,side,entry,sl,tp,qty,note FROM positions WHERE id=? AND status="OPEN"',(pid,)).fetchone()
-    if not row: conn.close(); return None
-    open_ts,symbol,side,entry,sl,tp,qty,note_open=row; meta=_meta_from_note(note_open) or {}
-    trade_mode=meta.get('trade_mode','unknown'); top=meta.get('top_strats')
-    pnl=(float(px)-float(entry))*float(qty)*(1 if side.upper()=="LONG" else -1)
-    c.execute('UPDATE positions SET close_ts=?, status=?, exit_price=?, pnl=?, note=? WHERE id=?',
-              (datetime.datetime.utcnow().isoformat(),"CLOSED",float(px),float(pnl),
-               "META2:"+json.dumps({"mode":trade_mode,"reason":note,"top":top},separators=(',',':')), pid))
-    conn.commit(); conn.close(); return pnl
-
-def partial_close(pid, px, qty_close, reason="TP"):
-    _init_db(); conn=sqlite3.connect(DB); c=conn.cursor()
-    row=c.execute('SELECT open_ts,symbol,side,entry,sl,tp,qty,note FROM positions WHERE id=? AND status="OPEN"',(pid,)).fetchone()
-    if not row: conn.close(); return None
-    open_ts,symbol,side,entry,sl,tp,qty,note_open=row; meta=_meta_from_note(note_open) or {}
-    qty_close=float(min(max(qty_close,0.0),float(qty)))
-    if qty_close<=0: conn.close(); return None
-    sign=1 if side.upper()=="LONG" else -1; pnl=(float(px)-float(entry))*qty_close*sign
-    trade_mode=meta.get('trade_mode','unknown'); top=meta.get('top_strats')
-    c.execute('INSERT INTO positions (open_ts,close_ts,symbol,side,entry,sl,tp,qty,status,exit_price,pnl,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-              (open_ts,datetime.datetime.utcnow().isoformat(),symbol,side,float(entry),float(sl),float(tp),float(qty_close),"CLOSED",float(px),float(pnl),
-               "META2:"+json.dumps({"mode":trade_mode,"reason":reason,"top":top},separators=(',',':'))))
-    remain=float(qty)-qty_close
-    if remain>1e-12:
-        c.execute('UPDATE positions SET qty=? WHERE id=? AND status="OPEN"',(remain,pid))
-    else:
-        c.execute('UPDATE positions SET close_ts=?, status=?, exit_price=?, pnl=?, note=? WHERE id=?',
-                  (datetime.datetime.utcnow().isoformat(),"CLOSED",float(px),float(pnl),
-                   "META2:"+json.dumps({"mode":trade_mode,"reason":reason+"(FULL)","top":top},separators=(',',':')), pid))
-    conn.commit(); conn.close(); return pnl
 
 # ───────── CCXT helpers + Fallback YF
 def build_exchange(name: str):
@@ -416,7 +481,25 @@ with st.expander("Risque avancé"):
         kv_set('daily_loss_limit', float(daily_loss_limit)); kv_set('cooldown_minutes', int(cooldown_minutes))
         kv_set('cluster_cap_pct', int(cluster_cap_pct));     kv_set('time_stop_bars', int(time_stop_bars))
         st.success("Paramètres risque avancé enregistrés.")
+with st.expander("📦 Données & sauvegardes", expanded=False):
+    o, c, t = _count_rows(DB)
+    st.caption(f"DB actuelle : `{DB}`")
+    st.caption(f"Positions: OPEN {o} · CLOSED {c} · TOTAL {t}")
 
+    colB1, colB2 = st.columns(2)
+    if colB1.button("💾 Sauvegarder (copie horodatée)"):
+        dest = _backup_db(DB)
+        if dest: st.success(f"Sauvegarde → {dest}")
+        else:    st.error("Échec sauvegarde.")
+
+    up = colB2.file_uploader("Importer / fusionner une DB (.db)", type=["db","sqlite"], accept_multiple_files=False)
+    if up is not None:
+        try:
+            added = _merge_db_bytes(DB, up.read())
+            st.success(f"Fusion OK — lignes ajoutées: {added}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Import/merge : {e}")
 # défauts si expander fermé
 exchange  = locals().get('exchange','okx')
 tf        = locals().get('tf','1h')
