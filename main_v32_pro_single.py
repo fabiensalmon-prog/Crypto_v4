@@ -1,20 +1,17 @@
-# HELIOS ONE — V5.2 ELITE+ (single file, mobile-friendly)
-# Features: Ensemble 20+ strats • Multi-TP (TP1→BE, TP2, TP3) • Trailing • Time-stop
-#           Kill-switch • Caps global & cluster • Sélection & %cap par trade • Stats par MODE
-# requirements.txt (recommandé) :
-#   streamlit
-#   pandas
-#   numpy
-#   yfinance
-#   ccxt           # optionnel (réel temps-réel exchange). Fallback YF auto si absent.
-#   pillow         # optionnel pour app_icon.png
+# HELIOS ONE — V5.3 ELITE++  (single file, mobile-friendly)
+# Features: 20+ strats ensemble • Multi-TP/BE/Trailing/Time-stop • Kill-switch
+#           Caps global & cluster • Sélection & %cap • Stats par MODE
+#           Anti-doublon (scan) • SCALE-IN par paliers de R (pondération d'entrée)
+#
+# requirements.txt :
+# streamlit, pandas, numpy, yfinance, ccxt (optionnel), pillow (optionnel)
 
 import os, json, sqlite3, datetime, math, shutil
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ───────── Page & icône
+# ───────────────────────── Page & icône
 ICON = "☀️"
 try:
     from PIL import Image
@@ -22,11 +19,11 @@ try:
         ICON = Image.open("app_icon.png")
 except Exception:
     pass
-st.set_page_config(page_title="HELIOS ONE — V5.2 ELITE+", page_icon=ICON, layout="centered")
-st.title("HELIOS ONE — V5.2 ELITE+")
-st.caption("Ensemble multi-strats • Sélection & %cap • Multi-TP • BE/Trailing • Kill-switch • Caps global/cluster • Stats par MODE")
+st.set_page_config(page_title="HELIOS ONE — V5.3 ELITE++", page_icon=ICON, layout="centered")
+st.title("HELIOS ONE — V5.3 ELITE++")
+st.caption("Ensemble multi-strats • Sélection & %cap • Multi-TP • BE/Trailing • Kill-switch • Caps global/cluster • Stats par MODE • Scale-in par R • Anti-doublon scan")
 
-# ───────── Dépendances externes
+# ───────────────────────── Dépendances externes
 try:
     import ccxt
     HAVE_CCXT = True
@@ -39,14 +36,14 @@ try:
 except Exception:
     HAVE_YF = False
 
-# ───────── Univers & mapping YF (fallback)
+# ───────────────────────── Univers & mapping YF (fallback)
 SYMBOLS_DEFAULT = ['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','AVAX/USDT','LINK/USDT','TON/USDT','DOGE/USDT','MATIC/USDT']
 YF_TICK = {
     'BTC/USDT':'BTC-USD','ETH/USDT':'ETH-USD','BNB/USDT':'BNB-USD','SOL/USDT':'SOL-USD','XRP/USDT':'XRP-USD',
     'ADA/USDT':'ADA-USD','AVAX/USDT':'AVAX-USD','LINK/USDT':'LINK-USD','TON/USDT':'TON-USD','DOGE/USDT':'DOGE-USD','MATIC/USDT':'MATIC-USD'
 }
 
-# ───────── Coûts par exchange (influence BE/trailing/time-stop via fee_buffer)
+# ───────────────────────── Coûts par exchange (influence BE/trailing/time-stop via fee_buffer)
 FALLBACK_EX = ['okx','bybit','kraken','coinbase','kucoin','binance']
 EX_COST = {
     'okx':     {'fee_bps': 8,  'slip_bps': 3},
@@ -57,7 +54,7 @@ EX_COST = {
     'binance': {'fee_bps': 8,  'slip_bps': 3},
 }
 
-# ───────── DB (SQLite) — robust path + auto-pick + backup/merge
+# ───────────────────────── DB (SQLite) — robust path + auto-pick + backup/merge
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 DATA_DIR = os.path.join(os.path.expanduser("~"), ".helios_one")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -79,21 +76,16 @@ def _count_rows(db_path):
         return (0, 0, 0)
 
 def _best_existing_db():
-    cand = [
-        os.path.join(BASE_DIR, "portfolio.db"),
-        os.path.join(DATA_DIR, "portfolio.db"),
-    ]
+    cand = [os.path.join(BASE_DIR, "portfolio.db"), os.path.join(DATA_DIR, "portfolio.db")]
     env_db = os.environ.get("HELIOS_DB", "").strip()
-    if env_db:
-        cand.append(env_db)
-    scored = []
+    if env_db: cand.append(env_db)
+    scored=[]
     for p in cand:
         if p and os.path.exists(p):
-            _, _, t = _count_rows(p)
-            scored.append((p, t))
+            _,_,t=_count_rows(p); scored.append((p,t))
     if not scored:
         return os.path.join(DATA_DIR, "portfolio.db")
-    scored.sort(key=lambda x: x[1], reverse=True)
+    scored.sort(key=lambda x:x[1], reverse=True)
     return scored[0][0]
 
 def _ensure_db_ready(db_path):
@@ -154,18 +146,17 @@ BEST   = _best_existing_db()
 STABLE = os.path.join(DATA_DIR, "portfolio.db")
 if os.path.abspath(BEST) != os.path.abspath(STABLE):
     try:
-        _, _, tb = _count_rows(BEST)
-        _, _, ts = _count_rows(STABLE)
-        if (not os.path.exists(STABLE)) or (tb > ts):
+        _,_,tb=_count_rows(BEST)
+        _,_,ts=_count_rows(STABLE)
+        if (not os.path.exists(STABLE)) or (tb>ts):
             shutil.copyfile(BEST, STABLE)
     except Exception:
         pass
 
-DB = STABLE
+DB=STABLE
 _ensure_db_ready(DB)
 
-def _init_db():
-    _ensure_db_ready(DB)
+def _init_db(): _ensure_db_ready(DB)
 
 def kv_get(k, default=None):
     _init_db(); conn=sqlite3.connect(DB)
@@ -183,121 +174,147 @@ def list_positions(status=None,limit=999999):
     q+=' ORDER BY id DESC LIMIT ?'; pr=pr+(int(limit),); rows=list(conn.execute(q,pr)); conn.close()
     return pd.DataFrame(rows,columns=['id','open_ts','close_ts','symbol','side','entry','sl','tp','qty','status','exit_price','pnl','note'])
 
-# ───────── Opérations DB (open/close/partial/SL)
+# ───────────────────────── Opérations DB (open/close/partial/SL/note/scale-in)
 def open_position(symbol, side, entry, sl, tp, qty, meta=None):
-    note = None
+    note=None
     if meta is not None:
-        try: note = "META:" + json.dumps(meta, ensure_ascii=False)
-        except Exception: note = None
-    ts = datetime.datetime.utcnow().isoformat()
-    conn = sqlite3.connect(DB)
+        try: note="META:"+json.dumps(meta, ensure_ascii=False)
+        except Exception: note=None
+    ts=datetime.datetime.utcnow().isoformat()
+    conn=sqlite3.connect(DB)
     conn.execute("""INSERT INTO positions (open_ts, symbol, side, entry, sl, tp, qty, status, note)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)""",
-                 (ts, str(symbol), str(side).upper(), float(entry), float(sl), float(tp), float(qty), note))
+                    VALUES (?,?,?,?,?,?,?,'OPEN',?)""",
+                 (ts,str(symbol),str(side).upper(),float(entry),float(sl),float(tp),float(qty),note))
     conn.commit(); conn.close()
 
 def update_sl(pos_id, new_sl):
-    conn = sqlite3.connect(DB)
+    conn=sqlite3.connect(DB)
     conn.execute("UPDATE positions SET sl=? WHERE id=? AND status='OPEN'", (float(new_sl), int(pos_id)))
     conn.commit(); conn.close()
 
-def partial_close(pos_id, price, qty_close, why=""):
-    if qty_close <= 0: return
-    conn = sqlite3.connect(DB); c = conn.cursor()
-    r = c.execute("SELECT id,open_ts,symbol,side,entry,sl,tp,qty,note FROM positions WHERE id=? AND status='OPEN'", (int(pos_id),)).fetchone()
-    if not r:
-        conn.close(); return
-    _, open_ts, symbol, side, entry, sl, tp, qty_open, note = r
-    qty_open = float(qty_open); qty_close = float(min(qty_close, qty_open))
-    sign = 1 if str(side).upper()=='LONG' else -1
-    pnl = (float(price) - float(entry)) * sign * qty_close
-    # insère une ligne "CLOSED"
-    close_ts = datetime.datetime.utcnow().isoformat()
-    # fabrique une note "META2" avec le mode, si possible
-    mode_info = None
+def update_note(pos_id, new_note):
+    conn=sqlite3.connect(DB)
+    conn.execute("UPDATE positions SET note=? WHERE id=? AND status='OPEN'", (new_note, int(pos_id)))
+    conn.commit(); conn.close()
+
+def _parse_meta(note):
     try:
-        if isinstance(note, str) and note.startswith("META:"):
-            meta = json.loads(note[5:])
-            mode_info = meta.get("trade_mode")
+        if isinstance(note,str) and note.startswith("META:"):
+            return json.loads(note[5:])
     except Exception:
         pass
-    note_closed = (why or "CLOSE")
+    return {}
+
+def _serialize_meta(meta): return "META:"+json.dumps(meta, ensure_ascii=False)
+
+def partial_close(pos_id, price, qty_close, why=""):
+    if qty_close<=0: return
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    r=c.execute("SELECT id,open_ts,symbol,side,entry,sl,tp,qty,note FROM positions WHERE id=? AND status='OPEN'",
+                (int(pos_id),)).fetchone()
+    if not r: conn.close(); return
+    _, open_ts, symbol, side, entry, sl, tp, qty_open, note = r
+    qty_open=float(qty_open); qty_close=float(min(qty_close, qty_open))
+    sign=1 if str(side).upper()=='LONG' else -1
+    pnl=(float(price)-float(entry))*sign*qty_close
+    close_ts=datetime.datetime.utcnow().isoformat()
+    # récup mode depuis META pour l'historique
+    mode_info=None
+    try:
+        meta=_parse_meta(note)
+        mode_info=meta.get("trade_mode")
+    except Exception: pass
+    note_closed=(why or "CLOSE")
     if mode_info:
-        note_closed = f"META2:{json.dumps({'mode': mode_info})} | {note_closed}"
+        note_closed=f"META2:{json.dumps({'mode':mode_info})} | {note_closed}"
     c.execute("""INSERT INTO positions (open_ts, close_ts, symbol, side, entry, sl, tp, qty, status, exit_price, pnl, note)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?)""",
+                 VALUES (?,?,?,?,?,?,?,?, 'CLOSED', ?, ?, ?)""",
               (open_ts, close_ts, symbol, side, float(entry), float(sl), float(tp), qty_close, float(price), float(pnl), note_closed))
-    # met à jour / supprime la ligne OPEN
-    rest = qty_open - qty_close
-    if rest <= 1e-12:
+    rest=qty_open-qty_close
+    if rest<=1e-12:
         c.execute("DELETE FROM positions WHERE id=?", (int(pos_id),))
     else:
         c.execute("UPDATE positions SET qty=? WHERE id=?", (float(rest), int(pos_id)))
     conn.commit(); conn.close()
 
 def close_position(pos_id, price, why=""):
-    # ferme 100% via partial_close
-    conn = sqlite3.connect(DB); c = conn.cursor()
-    r = c.execute("SELECT qty FROM positions WHERE id=? AND status='OPEN'", (int(pos_id),)).fetchone()
-    conn.close()
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    r=c.execute("SELECT qty FROM positions WHERE id=? AND status='OPEN'", (int(pos_id),)).fetchone(); conn.close()
     if not r: return
-    qty = float(r[0])
-    partial_close(pos_id, float(price), qty, why or "MANUAL_CLOSE")
+    qty=float(r[0]); partial_close(pos_id, float(price), qty, why or "MANUAL_CLOSE")
 
-# ───────── CCXT helpers + Fallback YF
+def add_to_position(pos_id, add_price, add_qty, why="SCALE_IN"):
+    """Scale-in: met à jour qty et entry (moyenne pondérée)."""
+    if add_qty<=0: return
+    conn=sqlite3.connect(DB); c=conn.cursor()
+    r=c.execute("SELECT entry, qty, note FROM positions WHERE id=? AND status='OPEN'", (int(pos_id),)).fetchone()
+    if not r: conn.close(); return
+    entry, qty, note = float(r[0]), float(r[1]), r[2]
+    new_qty = qty + float(add_qty)
+    new_entry = (entry*qty + float(add_price)*float(add_qty)) / max(new_qty, 1e-12)
+    c.execute("UPDATE positions SET entry=?, qty=? WHERE id=?", (float(new_entry), float(new_qty), int(pos_id)))
+    # trace dans META (steps_done)
+    meta=_parse_meta(note); si=meta.get("scale_in",{})
+    done=si.get("done",[]); done.append({"ts":datetime.datetime.utcnow().isoformat(), "price":float(add_price), "qty":float(add_qty), "why":why})
+    si["done"]=done; meta["scale_in"]=si
+    try: update_note(pos_id, _serialize_meta(meta))
+    except Exception: pass
+    conn.commit(); conn.close()
+
+# ───────────────────────── CCXT helpers + Fallback YF
 def build_exchange(name: str):
     if not HAVE_CCXT: return None
-    ex_cls = getattr(ccxt, name.lower()); return ex_cls({'enableRateLimit': True, 'options': {'adjustForTimeDifference': True}})
+    ex_cls=getattr(ccxt, name.lower()); return ex_cls({'enableRateLimit': True, 'options': {'adjustForTimeDifference': True}})
 def _map_symbol(ex: str, symbol: str) -> str:
     if ex=='kraken' and symbol.startswith('BTC/'):  return symbol.replace('BTC/','XBT/')
     if ex=='coinbase' and symbol.endswith('/USDT'): return symbol.replace('/USDT','/USDC')
     return symbol
 
 def fetch_ohlcv_ccxt(exchange_id: str, symbol: str, timeframe='1h', limit=1500) -> pd.DataFrame:
-    ex = build_exchange(exchange_id)
+    ex=build_exchange(exchange_id)
     if ex is None: raise RuntimeError("ccxt indisponible")
     ex.load_markets()
-    data = ex.fetch_ohlcv(_map_symbol(exchange_id, symbol), timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=['ts','open','high','low','close','volume'])
-    df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True); return df.set_index('ts')
+    data=ex.fetch_ohlcv(_map_symbol(exchange_id, symbol), timeframe=timeframe, limit=limit)
+    df=pd.DataFrame(data, columns=['ts','open','high','low','close','volume'])
+    df['ts']=pd.to_datetime(df['ts'], unit='ms', utc=True); return df.set_index('ts')
 
 def fetch_ohlcv_yf(symbol: str, timeframe='1h', limit=1500) -> pd.DataFrame:
     if not HAVE_YF: raise RuntimeError("yfinance indisponible")
-    t = YF_TICK.get(symbol, None)
+    t=YF_TICK.get(symbol,None)
     if t is None: raise RuntimeError(f"Pas de mapping YF pour {symbol}")
-    period = "730d" if timeframe in ("15m","1h","4h") else "max"
-    interval = {'15m':'15m','1h':'60m','4h':'240m'}.get(timeframe,'60m')
-    df = yf.download(t, period=period, interval=interval, progress=False)
+    period="730d" if timeframe in ("15m","1h","4h") else "max"
+    interval={'15m':'15m','1h':'60m','4h':'240m'}.get(timeframe,'60m')
+    df=yf.download(t, period=period, interval=interval, progress=False)
     if df is None or df.empty: raise RuntimeError("YF vide")
-    df = df[['Open','High','Low','Close','Volume']].rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
-    df.index = pd.to_datetime(df.index, utc=True); return df.tail(limit)
+    df=df[['Open','High','Low','Close','Volume']].rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
+    df.index=pd.to_datetime(df.index, utc=True); return df.tail(limit)
 
 def load_or_fetch(exchange_id: str, symbol: str, tf: str, limit=1500) -> pd.DataFrame:
-    last_err = None
+    last_err=None
     if HAVE_CCXT:
-        for ex in [exchange_id] + [e for e in FALLBACK_EX if e != exchange_id]:
+        for ex in [exchange_id]+[e for e in FALLBACK_EX if e!=exchange_id]:
             try: return fetch_ohlcv_ccxt(ex, symbol, tf, limit)
-            except Exception as e: last_err = e
+            except Exception as e: last_err=e
     try: return fetch_ohlcv_yf(symbol, tf, limit)
-    except Exception as e: last_err = e
+    except Exception as e: last_err=e
     raise RuntimeError(f"OHLCV échec {symbol} {tf}: {last_err}")
 
 def fetch_last_price(exchange_id: str, symbol: str) -> float:
     if HAVE_CCXT:
-        for ex in [exchange_id] + [e for e in FALLBACK_EX if e != exchange_id]:
+        for ex in [exchange_id]+[e for e in FALLBACK_EX if e!=exchange_id]:
             try:
-                inst = build_exchange(ex); inst.load_markets()
-                t = inst.fetch_ticker(_map_symbol(ex, symbol)); px = t.get('last') or t.get('close')
+                inst=build_exchange(ex); inst.load_markets()
+                t=inst.fetch_ticker(_map_symbol(ex, symbol)); px=t.get('last') or t.get('close')
                 if px: return float(px)
             except Exception: continue
     if HAVE_YF:
         try:
-            y = yf.download(YF_TICK.get(symbol,symbol), period="5d", interval="1m", progress=False)
+            y=yf.download(YF_TICK.get(symbol,symbol), period="5d", interval="1m", progress=False)
             if y is not None and not y.empty: return float(y['Close'].iloc[-1])
         except Exception: pass
     return np.nan
 
-# ───────── Indicateurs / Strats
+# ───────────────────────── Indicateurs / Strats
 def ema(s,n): return s.ewm(span=n,adjust=False).mean()
 def rsi(s,n=14):
     d=s.diff(); up=d.clip(lower=0).ewm(alpha=1/n,adjust=False).mean(); dn=-d.clip(upper=0).ewm(alpha=1/n,adjust=False).mean()
@@ -311,6 +328,7 @@ def kama(series, er_len=10, fast=2, slow=30):
     for i in range(1,len(series)): out.append(out[-1]+sc.iloc[i]*(series.iloc[i]-out[-1]))
     return pd.Series(out,index=series.index)
 
+# ... (strats, identiques à V5.2 — non modifiées)
 def s_ema_trend(df): f=ema(df['close'],12); s=ema(df['close'],48); return ((f>s).astype(int)-(f<s).astype(int)).rename('signal')
 def s_macd(df): f=ema(df['close'],12); s=ema(df['close'],26); m=f-s; sg=ema(m,9); return ((m>sg).astype(int)-(m<sg).astype(int)).rename('signal')
 def s_donchian(df,n=55): hh=df['high'].rolling(n).max(); ll=df['low'].rolling(n).min(); return ((df['close']>hh.shift()).astype(int)-(df['close']<ll.shift()).astype(int)).clip(-1,1).rename('signal')
@@ -377,7 +395,7 @@ def s_psar(df, af_step=0.02, af_max=0.2):
     for i in range(1,len(df)):
         prev=float(ps.iloc[i-1])
         if bull:
-            val=prev+af*(ep-prev); val=min(val,float(l.iloc[i-1]))
+            val=prev+af*(ep-prev); val=min(val,float(l.iloc[i-1])); 
             if i>1: val=min(val,float(l.iloc[i-2]))
             if float(h.iloc[i])>ep: ep=float(h.iloc[i]); af=min(af+af_step,af_max)
             if float(l.iloc[i])<val: bull=False; ps.iloc[i]=ep; ep=float(l.iloc[i]); af=af_step
@@ -406,7 +424,7 @@ STRATS = {
     'PSAR Trend':s_psar,'MFI MR':s_mfi,'OBV Trend':s_obv
 }
 
-# ───────── Ensemble / score
+# ───────────────────────── Ensemble / score
 def compute(df, signal, fee_bps=8.0, slip_bps=3.0):
     ret=df['close'].pct_change().fillna(0.0); pos=signal.shift().fillna(0.0).clip(-1,1)
     cost=(pos.diff().abs().fillna(0.0))*((fee_bps+slip_bps)/10000.0); pnl=pos*ret - cost; eq=(1+pnl).cumprod()
@@ -432,59 +450,48 @@ def blended_signal(signals, weights):
     v=(M.values*w).sum(axis=1)
     return pd.Series(v, index=M.index, name="signal").clip(-1,1)
 
-# ───────── Gates HTF + Macro
+# ───────────────────────── Gates HTF + Macro
 def htf_gate(df_ltf, df_htf): return s_ema_trend(df_htf).reindex(df_ltf.index).ffill().fillna(0.0)
 
 def yf_series(ticker: str, period="5y"):
-    if not HAVE_YF:
-        return None
+    if not HAVE_YF: return None
     try:
-        y = yf.download(tickers=ticker, period=period, interval="1d",
-                        auto_adjust=False, group_by="ticker", progress=False)
-        if y is None or len(y) == 0: return None
-        s = None
+        y=yf.download(tickers=ticker, period=period, interval="1d",
+                      auto_adjust=False, group_by="ticker", progress=False)
+        if y is None or len(y)==0: return None
+        s=None
         if isinstance(y.columns, pd.MultiIndex):
-            lvl0 = y.columns.get_level_values(0); lvl1 = y.columns.get_level_values(1)
-            if "Adj Close" in lvl0: s = y["Adj Close"]
-            elif "Adj Close" in lvl1: s = y.xs("Adj Close", axis=1, level=1)
-            elif "Close" in lvl0: s = y["Close"]
-            elif "Close" in lvl1: s = y.xs("Close", axis=1, level=1)
-            if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
+            lvl0=y.columns.get_level_values(0); lvl1=y.columns.get_level_values(1)
+            if "Adj Close" in lvl0: s=y["Adj Close"]
+            elif "Adj Close" in lvl1: s=y.xs("Adj Close", axis=1, level=1)
+            elif "Close" in lvl0: s=y["Close"]
+            elif "Close" in lvl1: s=y.xs("Close", axis=1, level=1)
+            if isinstance(s, pd.DataFrame): s=s.iloc[:,0]
         else:
-            s = y["Adj Close"] if "Adj Close" in y.columns else y.get("Close")
+            s=y["Adj Close"] if "Adj Close" in y.columns else y.get("Close")
         if s is None or s.empty: return None
-        s = s.astype(float)
-        try: s.index = pd.to_datetime(s.index, utc=True)
-        except Exception: s.index = pd.to_datetime(s.index).tz_localize("UTC")
-        s.name = ticker; return s
+        s=s.astype(float)
+        try: s.index=pd.to_datetime(s.index, utc=True)
+        except Exception: s.index=pd.to_datetime(s.index).tz_localize("UTC")
+        s.name=ticker; return s
     except Exception:
         return None
 
 def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
-    if not enable:
-        return 1.0, "macro OFF"
-    vix  = yf_series("^VIX")
-    gold = yf_series("GC=F")
-    if vix is None or vix.empty:
-        return 1.0, "no_vix"
-    lvl   = float(vix.iloc[-1])
-    mult  = 1.0
-    notes = []
-    if lvl > vix_riskoff:
-        mult = 0.0; notes.append("risk-off")
-    elif lvl > vix_caution:
-        mult = 0.5; notes.append("caution")
-    else:
-        notes.append("benign")
+    if not enable: return 1.0, "macro OFF"
+    vix=yf_series("^VIX"); gold=yf_series("GC=F")
+    if vix is None or vix.empty: return 1.0, "no_vix"
+    lvl=float(vix.iloc[-1]); mult=1.0; notes=[]
+    if lvl>vix_riskoff: mult=0.0; notes.append("risk-off")
+    elif lvl>vix_caution: mult=0.5; notes.append("caution")
+    else: notes.append("benign")
     if gold is not None and not gold.empty:
-        mom = float(gold.pct_change(63).iloc[-1])
-        if mom > gold_mom_thr:
-            mult *= 0.8
-            notes.append("gold↑")
-    mult = float(min(1.0, max(0.0, mult)))
+        mom=float(gold.pct_change(63).iloc[-1])
+        if mom>gold_mom_thr: mult*=0.8; notes.append("gold↑")
+    mult=float(min(1.0, max(0.0, mult)))
     return mult, " | ".join(notes)
 
-# ───────── Risk & sizing
+# ───────────────────────── Risk & sizing
 def rr(entry, sl, tp): R=abs(entry-sl); return float(abs(tp-entry)/(R if R>0 else 1e-9))
 def atr_levels(df, d, sl_mult=2.5, tp_mult=4.0):
     if d==0 or len(df)<2: return None
@@ -495,20 +502,31 @@ def atr_levels(df, d, sl_mult=2.5, tp_mult=4.0):
 def size_fixed_pct(equity, entry, stop, risk_pct):
     per=abs(entry-stop); risk=equity*(risk_pct/100.0); return 0.0 if per<=0 else risk/per
 
-# ───────── Clusters
+def R_value(entry, sl, side):
+    return (entry - sl) if side.upper()=="LONG" else (sl - entry)
+
+# ───────────────────────── Clusters
 def base(sym): return sym.split('/')[0].upper()
-CLUSTER = {'BTC':'Majors','ETH':'Majors','BNB':'Exchange','SOL':'L1','ADA':'L1','AVAX':'L1','TON':'L1','XRP':'Payments','LINK':'Infra','DOGE':'Meme','MATIC':'Infra'}
+CLUSTER={'BTC':'Majors','ETH':'Majors','BNB':'Exchange','SOL':'L1','ADA':'L1','AVAX':'L1','TON':'L1','XRP':'Payments','LINK':'Infra','DOGE':'Meme','MATIC':'Infra'}
 def symbol_cluster(sym): return CLUSTER.get(base(sym),'Other')
 
-# ───────── Modes (presets)
+# ───────────────────────── Modes (presets + scale-in plans)
 modes={
- 'Conservateur': dict(risk_pct=1.0, max_expo=60.0,  per_trade_cap=25.0, min_rr=1.8, max_positions=2, splits=(0.5,0.35,0.15), tpR=(0.9,1.7,2.6), gate_thr=0.35, leverage=1.0),
- 'Normal':       dict(risk_pct=2.0, max_expo=100.0, per_trade_cap=35.0, min_rr=1.8, max_positions=3, splits=(0.4,0.4,0.2), tpR=(1.0,2.0,3.5), gate_thr=0.30, leverage=1.0),
- 'Agressif':     dict(risk_pct=5.0, max_expo=150.0, per_trade_cap=40.0, min_rr=1.6, max_positions=5, splits=(0.30,0.40,0.30), tpR=(1.0,2.5,5.0), gate_thr=0.22, leverage=1.5),
- 'Super agressif (x5)': dict(risk_pct=2.5, max_expo=120.0, per_trade_cap=20.0, min_rr=2.2, max_positions=3, splits=(0.34,0.33,0.33), tpR=(1.2,3.0,6.0), gate_thr=0.60, leverage=5.0)
+ 'Conservateur': dict(risk_pct=1.0, max_expo=60.0,  per_trade_cap=25.0, min_rr=1.8, max_positions=2,
+                      splits=(0.5,0.35,0.15), tpR=(0.9,1.7,2.6), gate_thr=0.35, leverage=1.0,
+                      scale_in_ks=(0.6,), scale_in_fracs=(0.25,)),
+ 'Normal':       dict(risk_pct=2.0, max_expo=100.0, per_trade_cap=35.0, min_rr=1.8, max_positions=3,
+                      splits=(0.4,0.4,0.2), tpR=(1.0,2.0,3.5), gate_thr=0.30, leverage=1.0,
+                      scale_in_ks=(0.5,1.0), scale_in_fracs=(0.25,0.20)),
+ 'Agressif':     dict(risk_pct=5.0, max_expo=150.0, per_trade_cap=40.0, min_rr=1.6, max_positions=5,
+                      splits=(0.30,0.40,0.30), tpR=(1.0,2.5,5.0), gate_thr=0.22, leverage=1.5,
+                      scale_in_ks=(0.4,0.8,1.2), scale_in_fracs=(0.25,0.20,0.15)),
+ 'Super agressif (x5)': dict(risk_pct=2.5, max_expo=120.0, per_trade_cap=20.0, min_rr=2.2, max_positions=3,
+                      splits=(0.34,0.33,0.33), tpR=(1.2,3.0,6.0), gate_thr=0.60, leverage=5.0,
+                      scale_in_ks=(0.6,1.2), scale_in_fracs=(0.20,0.15))
 }
 
-# ───────── Sidebar (simple)
+# ───────────────────────── Sidebar (simple)
 st.markdown("### ⚙️ Mode & Réglages")
 mode = st.selectbox("Mode (je touche seulement à ça)", list(modes.keys()), index=1)
 m = modes[mode]
@@ -533,22 +551,16 @@ with st.expander("Risque avancé"):
         kv_set('cluster_cap_pct', int(cluster_cap_pct));     kv_set('time_stop_bars', int(time_stop_bars))
         st.success("Paramètres risque avancé enregistrés.")
 with st.expander("📦 Données & sauvegardes", expanded=False):
-    o, c, t = _count_rows(DB)
+    o,c,t=_count_rows(DB)
     st.caption(f"DB actuelle : `{DB}`")
     st.caption(f"Positions: OPEN {o} · CLOSED {c} · TOTAL {t}")
-
-    colB1, colB2 = st.columns(2)
-    if colB1.button("💾 Sauvegarder (copie horodatée)"):
-        dest = _backup_db(DB)
-        if dest: st.success(f"Sauvegarde → {dest}")
-        else:    st.error("Échec sauvegarde.")
-
-    up = colB2.file_uploader("Importer / fusionner une DB (.db)", type=["db","sqlite"], accept_multiple_files=False)
+    c1,c2=st.columns(2)
+    if c1.button("💾 Sauvegarder (copie horodatée)"):
+        dest=_backup_db(DB); st.success(f"Sauvegarde → {dest}" if dest else "Échec sauvegarde.")
+    up=c2.file_uploader("Importer / fusionner une DB (.db)", type=["db","sqlite"], accept_multiple_files=False)
     if up is not None:
         try:
-            added = _merge_db_bytes(DB, up.read())
-            st.success(f"Fusion OK — lignes ajoutées: {added}")
-            st.rerun()
+            added=_merge_db_bytes(DB, up.read()); st.success(f"Fusion OK — lignes ajoutées: {added}"); st.rerun()
         except Exception as e:
             st.error(f"Import/merge : {e}")
 
@@ -566,7 +578,7 @@ cluster_cap_pct = int(locals().get('cluster_cap_pct', kv_get('cluster_cap_pct',6
 time_stop_bars  = int(locals().get('time_stop_bars', kv_get('time_stop_bars',0)))
 fee_bps = EX_COST.get(exchange, EX_COST['okx'])['fee_bps']; slip_bps = EX_COST.get(exchange, EX_COST['okx'])['slip_bps']
 
-# ───────── Suggestion de mode
+# ───────────────────────── Suggestion de mode
 def suggest_mode():
     mm, note = macro_gate(macro_enabled)
     try:
@@ -580,7 +592,15 @@ def suggest_mode():
 s_mode, s_reason, s_macro = suggest_mode()
 st.info(f"💡 Suggestion de mode: **{s_mode}** — {s_reason} · Macro: {s_macro}")
 
-# ───────── Equity / kill-switch + helpers
+# ───────────────────────── Equity / kill-switch + helpers
+def open_positions_map():
+    df=list_positions(status='OPEN')
+    m={}
+    if not df.empty:
+        for _,r in df.iterrows():
+            m.setdefault(r['symbol'], {})[str(r['side']).upper()] = int(r['id'])
+    return m
+
 def portfolio_equity(base_capital, price_map=None):
     open_df=list_positions(status='OPEN'); closed_df=list_positions(status='CLOSED')
     realized=0.0 if closed_df.empty else float(closed_df['pnl'].sum()); latent=0.0
@@ -592,25 +612,24 @@ def portfolio_equity(base_capital, price_map=None):
     return base_capital+realized+latent
 
 def caps_snapshot_global(m):
-    open_now = list_positions(status='OPEN')
-    engaged_notional = 0.0 if open_now.empty else float((open_now['entry'] * open_now['qty']).sum())
-    eq = portfolio_equity(float(kv_get('base_capital', 1000.0)))
-    cap_max = eq * (m['max_expo'] / 100.0) * m['leverage']
-    room = max(0.0, cap_max - engaged_notional)
-    per_trade_cap = eq * (m['per_trade_cap'] / 100.0)
+    open_now=list_positions(status='OPEN')
+    engaged_notional=0.0 if open_now.empty else float((open_now['entry']*open_now['qty']).sum())
+    eq=portfolio_equity(float(kv_get('base_capital',1000.0)))
+    cap_max=eq*(m['max_expo']/100.0)*m['leverage']
+    room=max(0.0, cap_max - engaged_notional)
+    per_trade_cap = eq*(m['per_trade_cap']/100.0)
     return eq, engaged_notional, cap_max, room, per_trade_cap
 
 def current_cluster_expo():
-    open_now = list_positions(status='OPEN')
-    cluster_now = {}
+    open_now=list_positions(status='OPEN'); cluster_now={}
     if not open_now.empty:
-        for _,r__ in open_now.iterrows():
-            cl = symbol_cluster(r__['symbol'])
-            cluster_now[cl] = cluster_now.get(cl,0.0) + float(r__['entry']*r__['qty'])
+        for _,r in open_now.iterrows():
+            cl=symbol_cluster(r['symbol'])
+            cluster_now[cl]=cluster_now.get(cl,0.0) + float(r['entry']*r['qty'])
     return cluster_now
 
-capital = float(kv_get('base_capital',1000.0))
-eq_now = portfolio_equity(capital)
+capital=float(kv_get('base_capital',1000.0))
+eq_now=portfolio_equity(capital)
 st.metric("💼 Portefeuille (équity dynamique)", f"{eq_now:.2f} USD")
 
 def realized_today():
@@ -620,33 +639,36 @@ def realized_today():
     vals=hist.copy(); vals['date']=pd.to_datetime(vals['close_ts']).dt.date
     return float(vals.loc[vals['date']==today,'pnl'].sum())
 
-cooldown_until = kv_get('cooldown_until', None); now_utc = datetime.datetime.utcnow().timestamp()
-if cooldown_until and now_utc < float(cooldown_until):
-    eta = datetime.datetime.utcfromtimestamp(float(cooldown_until)).strftime("%Y-%m-%d %H:%M:%S UTC")
-    st.warning(f"⏳ Kill-switch actif jusqu’à {eta}."); kill_active = True
+cooldown_until=kv_get('cooldown_until', None); now_utc=datetime.datetime.utcnow().timestamp()
+if cooldown_until and now_utc<float(cooldown_until):
+    eta=datetime.datetime.utcfromtimestamp(float(cooldown_until)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    st.warning(f"⏳ Kill-switch actif jusqu’à {eta}."); kill_active=True
 else:
-    kill_active = False
-    pnl_today = realized_today()
-    if daily_loss_limit>0 and pnl_today <= -daily_loss_limit:
-        until = datetime.datetime.utcnow() + datetime.timedelta(minutes=cooldown_minutes)
+    kill_active=False
+    pnl_today=realized_today()
+    if daily_loss_limit>0 and pnl_today<=-daily_loss_limit:
+        until=datetime.datetime.utcnow()+datetime.timedelta(minutes=cooldown_minutes)
         kv_set('cooldown_until', until.timestamp())
         st.warning(f"❌ Limite journalière atteinte ({pnl_today:.2f} USD). Cooldown {cooldown_minutes} min activé.")
-        kill_active = True
+        kill_active=True
 
-# ───────── Utilitaires TP/SL
+# ───────────────────────── Utilitaires TP/SL & META
 def r_targets(entry, sl, side, tpR=(1.0,2.0,3.5)):
     side=side.upper(); sign=1 if side=="LONG" else -1; R=(entry-sl) if side=="LONG" else (sl-entry)
     if R<=0: return None
     return [entry+sign*r*R for r in tpR]
+
 def build_meta_r(entry, sl, side, qty, splits=(0.4,0.4,0.2), tpR=(1.0,2.0,3.5),
-                 be_after_tp1=True, trade_mode="Normal", top_strats=None, confidence=None):
+                 be_after_tp1=True, trade_mode="Normal", top_strats=None, confidence=None,
+                 scale_in_ks=(), scale_in_fracs=()):
     tps=r_targets(entry,sl,side,tpR); q1,q2,q3=[float(qty*max(0.0,s)) for s in splits]; diff=float(qty)-(q1+q2+q3); q3=max(0.0,q3+diff)
     meta={'multi_tp':True,'mode':'R','trade_mode':str(trade_mode),'tpR':list(tpR),'splits':list(splits),
           'targets':[{'name':'TP1','px':tps[0],'qty':q1,'filled':False},
                      {'name':'TP2','px':tps[1],'qty':q2,'filled':False},
                      {'name':'TP3','px':tps[2],'qty':q3,'filled':False}],
-          'be_after_tp1':bool(be_after_tp1),'trail_after_tp2':True}
-    if isinstance(top_strats, list): meta['top_strats']=top_strats[:5]
+          'be_after_tp1':bool(be_after_tp1),'trail_after_tp2':True,
+          'scale_in': {'plan':'R', 'ks': list(scale_in_ks), 'fracs': list(scale_in_fracs), 'base_qty': float(qty), 'done': []}}
+    if isinstance(top_strats,list): meta['top_strats']=top_strats[:5]
     if confidence is not None: meta['confidence']=float(confidence)
     return meta
 
@@ -717,10 +739,10 @@ def auto_manage_positions(price_map, ohlc_map=None, mode="Normal", be_after_tp1=
                 if pnl_now<=0: partial_close(int(r['id']),px,qty,"TIME_STOP"); evts.append((sym,"TIME_STOP",px,qty))
     return evts
 
-# ───────── Onglets
+# ───────────────────────── Onglets
 tabs = st.tabs(['🏠 Décision','📈 Portefeuille','🧾 Historique','📊 Analyse','🔬 Lab'])
 
-# ───────── 1) Décision
+# ───────────────────────── 1) Décision
 with tabs[0]:
     st.subheader("Top Picks (1 clic)")
     mm, macro_note = macro_gate(macro_enabled)
@@ -748,12 +770,13 @@ with tabs[0]:
     if 'scan_conf' not in st.session_state: st.session_state.scan_conf = {}
     if 'scan_rejects' not in st.session_state: st.session_state.scan_rejects = []
 
-    # ---------- SCAN ----------
     show_borderline = st.toggle("Voir les candidats filtrés (debug)", value=False)
 
     if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_active):
         if kill_active: st.stop()
         rows=[]; tops={}; confs={}; rejects=[]
+        open_map = open_positions_map()  # anti-doublon
+
         for sym in symbols:
             try:
                 df  = load_or_fetch(exchange, sym, tf, 1200)
@@ -768,23 +791,25 @@ with tabs[0]:
             gate    = htf_gate(df, dfH)
             blended = (sig*gate).clip(-1,1)*mm
             b_val   = float(blended.iloc[-1])
-
             d = int(np.sign(b_val))
+
+            # anti-doublon: si déjà ouvert même côté → rejet
+            if sym in open_map and ((d>0 and 'LONG' in open_map[sym]) or (d<0 and 'SHORT' in open_map[sym])):
+                rejects.append(dict(symbol=sym, reason="already_open", dir=('LONG' if d>0 else 'SHORT') if d!=0 else '—',
+                                    blended=b_val, rr=np.nan, qty=0.0, entry=np.nan, sl=np.nan, tp=np.nan,
+                                    tp1=np.nan, tp2=np.nan, tp3=np.nan, confidence=0.0, pct_cap=0.0))
+                continue
+
             if d == 0:
-                rejects.append(dict(symbol=sym, reason="flat",
-                                    dir="—", blended=b_val, rr=np.nan, qty=0.0,
-                                    entry=np.nan, sl=np.nan, tp=np.nan,
-                                    tp1=np.nan, tp2=np.nan, tp3=np.nan,
+                rejects.append(dict(symbol=sym, reason="flat", dir='—', blended=b_val, rr=np.nan, qty=0.0,
+                                    entry=np.nan, sl=np.nan, tp=np.nan, tp1=np.nan, tp2=np.nan, tp3=np.nan,
                                     confidence=0.0, pct_cap=0.0))
                 continue
 
             lvl = atr_levels(df, d, sl_mult, tp_mult)
             if not lvl:
-                rejects.append(dict(symbol=sym, reason="no_levels",
-                                    dir="LONG" if d>0 else "SHORT", blended=b_val, rr=np.nan, qty=0.0,
-                                    entry=np.nan, sl=np.nan, tp=np.nan,
-                                    tp1=np.nan, tp2=np.nan, tp3=np.nan,
-                                    confidence=0.0, pct_cap=0.0))
+                rejects.append(dict(symbol=sym, reason="no_levels", dir="LONG" if d>0 else "SHORT", blended=b_val, rr=np.nan, qty=0.0,
+                                    entry=np.nan, sl=np.nan, tp=np.nan, tp1=np.nan, tp2=np.nan, tp3=np.nan, confidence=0.0, pct_cap=0.0))
                 continue
 
             r_r  = rr(lvl['entry'], lvl['sl'], lvl['tp'])
@@ -792,29 +817,25 @@ with tabs[0]:
             conf = float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum())
             tps  = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d>0 else 'SHORT', m['tpR'])
 
-            cand = dict(
-                symbol=sym, dir=('LONG' if d>0 else 'SHORT'),
-                entry=lvl['entry'], sl=lvl['sl'], tp=lvl['tp'],
-                tp1=tps[0], tp2=tps[1], tp3=tps[2],
-                rr=r_r, qty=qty0, pct_cap=0.0, confidence=conf, blended=b_val
-            )
+            cand = dict(symbol=sym, dir=('LONG' if d>0 else 'SHORT'),
+                        entry=lvl['entry'], sl=lvl['sl'], tp=lvl['tp'],
+                        tp1=tps[0], tp2=tps[1], tp3=tps[2],
+                        rr=r_r, qty=qty0, pct_cap=0.0, confidence=conf, blended=b_val)
 
-            fail = None
-            if abs(b_val) < m['gate_thr']: fail = "gate_thr"
-            elif r_r < m['min_rr']:        fail = "min_rr"
-            elif qty0 <= 0:                fail = "qty0"
+            fail=None
+            if abs(b_val) < m['gate_thr']: fail="gate_thr"
+            elif r_r < m['min_rr']:        fail="min_rr"
+            elif qty0 <= 0:                fail="qty0"
 
             if fail:
-                rejects.append({**cand, "reason": fail})
-                continue
+                rejects.append({**cand, "reason": fail}); continue
 
             rows.append(cand)
             tops[len(rows)-1]  = [(k,float(v)) for k,v in w.sort_values(ascending=False).head(5).items()]
             confs[len(rows)-1] = conf
 
-        # stocke résultats (même si 0 → DataFrame vide mais OK)
-        if len(rows)==0:
-            st.session_state.scan_df = pd.DataFrame()
+        # stocke résultats
+        if len(rows)==0: st.session_state.scan_df=pd.DataFrame()
         else:
             st.session_state.scan_df = (
                 pd.DataFrame(rows)
@@ -827,11 +848,7 @@ with tabs[0]:
         st.session_state.scan_rejects = rejects
         st.rerun()
 
-    # ---------- AFFICHAGE / ACTION ----------
-    picks    = st.session_state.scan_df
-    rejects  = st.session_state.get('scan_rejects', [])
-
-    # helpers d'ouverture (utilisés aussi par "forcer")
+    # helpers d'ouverture
     price_mode = st.selectbox("Prix d'entrée", ["Suggéré (entry)", "Prix du marché"], index=0)
     def _preview_one(r, eq, per_trade_cap, room, cap_cluster_abs, cluster_now):
         qty = float(r['qty'])
@@ -842,7 +859,7 @@ with tabs[0]:
             return dict(qty_eff=0.0, notional=0.0, room_after=room,
                         cl=cl, cl_room_after=max(0.0, cap_cluster_abs - cluster_now.get(cl,0.0)),
                         capped=False)
-        entry = float(r['entry'])
+        entry = float(r['entry']); 
         if price_mode == "Prix du marché":
             entry = float(fetch_last_price(exchange, r['symbol']) or entry)
         notional = qty * entry
@@ -864,8 +881,7 @@ with tabs[0]:
         qty = float(r['qty'])
         if float(r.get('pct_cap',0.0)) > 0:
             qty = (eq * (float(r['pct_cap'])/100.0)) / max(float(r['entry']), 1e-9)
-        if qty <= 0:
-            st.warning("Quantité = 0."); return
+        if qty <= 0: st.warning("Quantité = 0."); return
         entry = float(r['entry'])
         if price_mode == "Prix du marché":
             entry = float(fetch_last_price(exchange, r['symbol']) or entry)
@@ -873,91 +889,73 @@ with tabs[0]:
         scale = 1.0
         if notional > per_trade_cap: scale = min(scale, per_trade_cap / max(notional, 1e-9))
         if notional > room:          scale = min(scale, room / max(notional, 1e-9))
-        cl = symbol_cluster(r['symbol'])
-        cl_now = cluster_now.get(cl, 0.0)
+        cl = symbol_cluster(r['symbol']); cl_now = cluster_now.get(cl, 0.0)
         if cl_now + notional*scale > cap_cluster_abs:
             leftover = max(0.0, cap_cluster_abs - cl_now)
             scale = min(scale, leftover / max(notional, 1e-9))
         qty_eff = qty * max(0.0, scale)
-        if qty_eff <= 0:
-            st.warning("Cap atteint (global/cluster)."); return
-        meta = build_meta_r(
-            entry, float(r['sl']), r['dir'], qty_eff,
-            splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
-            trade_mode=mode,
-            top_strats=st.session_state.scan_top.get(i, []),
-            confidence=st.session_state.scan_conf.get(i, 0.0)
-        )
+        if qty_eff <= 0: st.warning("Cap atteint (global/cluster)."); return
+        meta = build_meta_r(entry, float(r['sl']), r['dir'], qty_eff,
+                            splits=m['splits'], tpR=m['tpR'], be_after_tp1=True,
+                            trade_mode=mode,
+                            top_strats=st.session_state.scan_top.get(i, []),
+                            confidence=st.session_state.scan_conf.get(i, 0.0),
+                            scale_in_ks=m.get('scale_in_ks',()), scale_in_fracs=m.get('scale_in_fracs',()))
         open_position(r['symbol'], r['dir'], entry, float(r['sl']), float(r['tp']), qty_eff, meta=meta)
         cluster_now[cl] = cluster_now.get(cl, 0.0) + qty_eff * entry
+
+    picks = st.session_state.scan_df
+    rejects = st.session_state.get('scan_rejects', [])
 
     if picks.empty:
         st.warning("Aucun setup éligible avec les seuils actuels.")
         if show_borderline:
             with st.expander("Candidats filtrés (debug + possibilité de forcer)", expanded=False):
-                if not rejects:
-                    st.caption("—")
+                if not rejects: st.caption("—")
                 else:
-                    rej_df = pd.DataFrame(rejects).copy()
-                    rej_df = rej_df[['symbol','dir','reason','blended','rr','qty','entry','sl','tp','tp1','tp2','tp3','confidence']]
-                    st.dataframe(rej_df.round(6), use_container_width=True)
-                    st.caption("Astuce : reason=gate_thr → contre ton gate ; min_rr → R/R trop faible ; qty0 → sizing nul.")
-                    # meilleurs par |blended|
-                    top_force = rej_df.reindex(rej_df['blended'].abs().sort_values(ascending=False).index).head(5)
+                    rej_df=pd.DataFrame(rejects).copy()
+                    cols = ['symbol','dir','reason','blended','rr','qty','entry','sl','tp','tp1','tp2','tp3','confidence']
+                    st.dataframe(rej_df[cols].round(6), use_container_width=True)
+                    st.caption("Astuce : reason=already_open (anti-doublon) • gate_thr (contre gate) • min_rr (R/R) • qty0 (sizing nul).")
+                    top_force = rej_df[rej_df['reason']!='already_open'].reindex(rej_df['blended'].abs().sort_values(ascending=False).index).head(5)
                     for j, r0 in top_force.iterrows():
-                        # valeurs de secours
-                        q = float(r0.get('qty', 0.0))
-                        if q <= 0 and np.isfinite(r0['entry']) and np.isfinite(r0['sl']):
-                            q = size_fixed_pct(eq, float(r0['entry']), float(r0['sl']), m['risk_pct'])
-                        rr_val = r0['rr']
+                        q=float(r0.get('qty',0.0))
+                        if q<=0 and np.isfinite(r0['entry']) and np.isfinite(r0['sl']):
+                            q=size_fixed_pct(eq, float(r0['entry']), float(r0['sl']), m['risk_pct'])
+                        rr_val=r0['rr']
                         if not np.isfinite(rr_val) and np.isfinite(r0['entry']) and np.isfinite(r0['sl']) and np.isfinite(r0['tp']):
-                            rr_val = rr(float(r0['entry']), float(r0['sl']), float(r0['tp']))
-                        rtake = {
-                            'symbol': r0['symbol'], 'dir': r0['dir'],
-                            'entry': float(r0['entry']) if np.isfinite(r0['entry']) else np.nan,
-                            'sl': float(r0['sl']) if np.isfinite(r0['sl']) else np.nan,
-                            'tp': float(r0['tp']) if np.isfinite(r0['tp']) else np.nan,
-                            'tp1': float(r0['tp1']) if np.isfinite(r0['tp1']) else np.nan,
-                            'tp2': float(r0['tp2']) if np.isfinite(r0['tp2']) else np.nan,
-                            'tp3': float(r0['tp3']) if np.isfinite(r0['tp3']) else np.nan,
-                            'rr': float(rr_val) if np.isfinite(rr_val) else 0.0,
-                            'qty': float(q), 'pct_cap': 0.0,
-                            'confidence': float(r0.get('confidence', 0.0))
-                        }
-                        cols = st.columns([3,1])
+                            rr_val=rr(float(r0['entry']), float(r0['sl']), float(r0['tp']))
+                        rtake={'symbol':r0['symbol'],'dir':r0['dir'],'entry':float(r0['entry']) if np.isfinite(r0['entry']) else np.nan,
+                               'sl':float(r0['sl']) if np.isfinite(r0['sl']) else np.nan,'tp':float(r0['tp']) if np.isfinite(r0['tp']) else np.nan,
+                               'tp1':float(r0['tp1']) if np.isfinite(r0['tp1']) else np.nan,'tp2':float(r0['tp2']) if np.isfinite(r0['tp2']) else np.nan,
+                               'tp3':float(r0['tp3']) if np.isfinite(r0['tp3']) else np.nan,'rr':float(rr_val) if np.isfinite(rr_val) else 0.0,
+                               'qty':float(q),'pct_cap':0.0,'confidence':float(r0.get('confidence',0.0))}
+                        cols=st.columns([3,1])
                         cols[0].markdown(f"**{rtake['symbol']}** · {rtake['dir']} · raison `{r0['reason']}` · |blended| `{abs(float(r0['blended'])):.3f}` · R/R `{rtake['rr']:.2f}`")
                         disabled_force = (not np.isfinite(rtake['entry'])) or (not np.isfinite(rtake['sl'])) or (not np.isfinite(rtake['tp'])) or (rtake['qty']<=0)
                         if cols[1].button(f"⚠️ Forcer {rtake['symbol']}", key=f"force_{j}", disabled=disabled_force):
                             _take_one(j, rtake); st.success("Ouvert (forcé) ✅"); st.rerun()
     else:
-        table = picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
+        table=picks[['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence']].copy()
         table.insert(0,'take',True)
-        edit = st.data_editor(
-            table, hide_index=True, num_rows="fixed", use_container_width=True,
-            column_config={
-                "take": st.column_config.CheckboxColumn("Prendre"),
-                "qty": st.column_config.NumberColumn("qty (si %cap=0)", step=0.0001, format="%.6f"),
-                "pct_cap": st.column_config.NumberColumn("%cap (override)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
-                "rr": st.column_config.NumberColumn("R/R", format="%.2f", disabled=True),
-                "confidence": st.column_config.NumberColumn("Confiance", format="%.3f", disabled=True),
-                "tp1": st.column_config.NumberColumn("TP1", format="%.6f", disabled=True),
-                "tp2": st.column_config.NumberColumn("TP2", format="%.6f", disabled=True),
-                "tp3": st.column_config.NumberColumn("TP3", format="%.6f", disabled=True),
-            }
-        )
+        edit=st.data_editor(table, hide_index=True, num_rows="fixed", use_container_width=True,
+                            column_config={
+                                "take": st.column_config.CheckboxColumn("Prendre"),
+                                "qty": st.column_config.NumberColumn("qty (si %cap=0)", step=0.0001, format="%.6f"),
+                                "pct_cap": st.column_config.NumberColumn("%cap (override)", min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
+                                "rr": st.column_config.NumberColumn("R/R", format="%.2f", disabled=True),
+                                "confidence": st.column_config.NumberColumn("Confiance", format="%.3f", disabled=True),
+                                "tp1": st.column_config.NumberColumn("TP1", format="%.6f", disabled=True),
+                                "tp2": st.column_config.NumberColumn("TP2", format="%.6f", disabled=True),
+                                "tp3": st.column_config.NumberColumn("TP3", format="%.6f", disabled=True),
+                            })
 
         st.markdown("##### Actions par trade")
-        for i, r in edit.iterrows():
-            c1, c2, c3 = st.columns([3,1,1])
-            pv = _preview_one(r, eq, per_trade_cap, room, cap_cluster_abs, cluster_now)
-            c1.write(
-                f"**{r['symbol']}** · {r['dir']} · entry `{float(r['entry']):.6f}` · SL `{float(r['sl']):.6f}` · "
-                f"R/R `{float(r['rr']):.2f}` · conf `{float(r['confidence']):.3f}` · %cap `{float(r['pct_cap']):.1f}`"
-            )
-            c1.caption(
-                f"Prévu → notional {pv['notional']:.2f} · reste {pv['room_after']:.2f} · "
-                f"cluster {pv['cl']} dispo {pv['cl_room_after']:.2f}" + (" · cap limité" if pv['capped'] else "")
-            )
+        for i,r in edit.iterrows():
+            c1,c2,c3=st.columns([3,1,1])
+            pv=_preview_one(r, eq, per_trade_cap, room, cap_cluster_abs, cluster_now)
+            c1.write(f"**{r['symbol']}** · {r['dir']} · entry `{float(r['entry']):.6f}` · SL `{float(r['sl']):.6f}` · R/R `{float(r['rr']):.2f}` · conf `{float(r['confidence']):.3f}` · %cap `{float(r['pct_cap']):.1f}`")
+            c1.caption(f"Prévu → notional {pv['notional']:.2f} · reste {pv['room_after']:.2f} · cluster {pv['cl']} dispo {pv['cl_room_after']:.2f}" + (" · cap limité" if pv['capped'] else ""))
             if c2.button("📌 Prendre ce trade", key=f"take_row_{i}"):
                 _take_one(i, r); st.success("Ouvert ✅"); st.rerun()
             if c3.button("🔬 Lab", key=f"lab_row_{i}"):
@@ -972,136 +970,144 @@ with tabs[0]:
                 except Exception as e:
                     st.warning(str(e))
 
-        # Actions groupées
-        sel = edit[edit['take']].copy()
-        cA, cB = st.columns(2)
+        sel=edit[edit['take']].copy()
+        cA,cB=st.columns(2)
         if cA.button("📌 Prendre la sélection"):
             if sel.empty: st.warning("Rien de sélectionné.")
             else:
-                tmp = sel.copy()
+                tmp=sel.copy()
                 for idx in tmp.index:
                     if float(tmp.loc[idx,'pct_cap'])>0:
-                        tmp.loc[idx,'qty'] = (eq * (float(tmp.loc[idx,'pct_cap'])/100.0)) / max(float(tmp.loc[idx,'entry']),1e-9)
+                        tmp.loc[idx,'qty']=(eq*(float(tmp.loc[idx,'pct_cap'])/100.0))/max(float(tmp.loc[idx,'entry']),1e-9)
                 total_alloc=float((tmp['qty']*tmp['entry']).sum()) if not tmp.empty else 0.0
                 scale_g=1.0
-                if total_alloc>room: scale_g = room/max(total_alloc,1e-9)
-                for i, r in tmp.iterrows():
-                    r = r.copy(); r['qty'] = float(r['qty'])*scale_g
+                if total_alloc>room: scale_g=room/max(total_alloc,1e-9)
+                for i,r in tmp.iterrows():
+                    r=r.copy(); r['qty']=float(r['qty'])*scale_g
                     _take_one(i, r)
                 st.success("Trades ouverts ✅"); st.rerun()
-
         if cB.button("🧮 Simuler l’allocation"):
-            tmp = sel.copy()
+            tmp=sel.copy()
             for idx in tmp.index:
                 if float(tmp.loc[idx,'pct_cap'])>0:
-                    tmp.loc[idx,'qty'] = (eq * (float(tmp.loc[idx,'pct_cap'])/100.0)) / max(float(tmp.loc[idx,'entry']),1e-9)
+                    tmp.loc[idx,'qty']=(eq*(float(tmp.loc[idx,'pct_cap'])/100.0))/max(float(tmp.loc[idx,'entry']),1e-9)
             alloc=float((tmp['qty']*tmp['entry']).sum()) if not tmp.empty else 0.0
             st.info(f"{len(tmp)} trades · Allocation brute {alloc:.2f} USD  \nCap/trade {per_trade_cap:.2f} · Espace cap {room:.2f} · Cap/cluster {cap_cluster_abs:.2f}")
 
-# ───────── 2) Portefeuille
+# ───────────────────────── 2) Portefeuille
 with tabs[1]:
     st.subheader("Positions ouvertes")
     eq, engaged_notional, cap_gross, room, per_trade_cap = caps_snapshot_global(m)
-    cap_cluster_abs = cap_gross * (cluster_cap_pct/100.0)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Équity", f"{eq:.2f} USD")
-    c2.metric("Engagé", f"{engaged_notional:.2f} USD")
-    c3.metric("Cap max", f"{cap_gross:.2f} USD")
-    c4.metric("Reste investissable", f"{room:.2f} USD")
-    c5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
-    liquid2 = max(0.0, eq - engaged_notional)
-    st.caption(f"Liquidité (équity − engagé) : **{liquid2:.2f} USD**")
+    cap_cluster_abs = cap_gross*(cluster_cap_pct/100.0)
+    c1,c2,c3,c4,c5=st.columns(5)
+    c1.metric("Équity", f"{eq:.2f} USD"); c2.metric("Engagé", f"{engaged_notional:.2f} USD")
+    c3.metric("Cap max", f"{cap_gross:.2f} USD"); c4.metric("Reste investissable", f"{room:.2f} USD"); c5.metric("Cap / trade", f"{per_trade_cap:.2f} USD")
+    st.caption(f"Liquidité (équity − engagé) : **{max(0.0, eq - engaged_notional):.2f} USD**")
 
-    open_df = list_positions(status='OPEN')
+    open_df=list_positions(status='OPEN')
     if open_df.empty or (open_df['qty']<=1e-12).all():
         st.info("Aucune position.")
     else:
-        open_df = open_df[open_df['qty']>1e-12].copy()
-        last = {s: fetch_last_price(exchange, s) for s in open_df['symbol'].unique()}
-        open_df['last'] = open_df['symbol'].map(last)
-        mask = ~np.isfinite(open_df['last'])
-        open_df.loc[mask, 'last'] = open_df.loc[mask, 'entry']
-        open_df['↗︎/↘︎'] = np.where(
-            ((open_df['side']=='LONG') & (open_df['last']>open_df['entry'])) |
-            ((open_df['side']=='SHORT') & (open_df['last']<open_df['entry'])),
-            "✅ ↗︎", "❌ ↘︎"
-        )
-        open_df['ret_%'] = (
-            (open_df['last']-open_df['entry'])
-            .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
-            / open_df['entry'] * 100
-        ).round(3)
-        open_df['PnL_latent'] = (
-            (open_df['last']-open_df['entry'])
-            .where(open_df['side']=='LONG', open_df['entry']-open_df['last'])
-            * open_df['qty']
-        ).round(6)
+        open_df=open_df[open_df['qty']>1e-12].copy()
+        last={s: fetch_last_price(exchange,s) for s in open_df['symbol'].unique()}
+        open_df['last']=open_df['symbol'].map(last); mask=~np.isfinite(open_df['last'])
+        open_df.loc[mask,'last']=open_df.loc[mask,'entry']
+        open_df['↗︎/↘︎']=np.where(((open_df['side']=='LONG')&(open_df['last']>open_df['entry']))|((open_df['side']=='SHORT')&(open_df['last']<open_df['entry'])),"✅ ↗︎","❌ ↘︎")
+        open_df['ret_%']=(((open_df['last']-open_df['entry']).where(open_df['side']=='LONG', open_df['entry']-open_df['last']))/open_df['entry']*100).round(3)
+        open_df['PnL_latent']=(((open_df['last']-open_df['entry']).where(open_df['side']=='LONG', open_df['entry']-open_df['last']))*open_df['qty']).round(6)
 
-        st.dataframe(
-            open_df[['↗︎/↘︎','id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']],
-            use_container_width=True
-        )
+        st.dataframe(open_df[['↗︎/↘︎','id','symbol','side','entry','sl','tp','qty','last','ret_%','PnL_latent','note']], use_container_width=True)
 
         if st.button("🔄 Mettre à jour (TP/SL + BE/Trailing + Time-stop)"):
-            ohlc_map = {s: load_or_fetch(exchange, s, tf, 300) for s in open_df['symbol'].unique()}
-            events = auto_manage_positions(
-                last, ohlc_map, mode=mode, be_after_tp1=True, trail_after_tp2=True,
-                fee_buffer_bps=fee_bps+slip_bps,
-                time_stop_bars=time_stop_bars,
-                tf_minutes={'15m':15,'1h':60,'4h':240}.get(tf,60)
-            )
-            for sym, why, px, q in events:
-                st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
+            ohlc_map={s: load_or_fetch(exchange, s, tf, 300) for s in open_df['symbol'].unique()}
+            events=auto_manage_positions(last, ohlc_map, mode=mode, be_after_tp1=True, trail_after_tp2=True,
+                                         fee_buffer_bps=fee_bps+slip_bps, time_stop_bars=time_stop_bars,
+                                         tf_minutes={'15m':15,'1h':60,'4h':240}.get(tf,60))
+            for sym,why,px,q in events: st.success(f"{sym}: {why} @ {px:.6f} (qty {q:.4f})")
             st.rerun()
 
         def _safe_px(sym, entry):
-            p = last.get(sym, None)
+            p=last.get(sym,None)
             try:
-                if p is None or (isinstance(p, float) and math.isnan(p)):
-                    return float(entry)
+                if p is None or (isinstance(p,float) and math.isnan(p)): return float(entry)
                 return float(p)
-            except Exception:
-                return float(entry)
+            except Exception: return float(entry)
 
+        # ===== SCALE-IN détecteur + actions =====
+        st.markdown("### ➕ Scale-in (paliers R)")
+        for _, r in open_df.iterrows():
+            meta=_parse_meta(r['note']); si=meta.get("scale_in",{})
+            ks=si.get("ks",[]); fr=si.get("fracs",[]); base_qty=float(si.get("base_qty", r['qty']))
+            done=si.get("done",[])
+            side=str(r['side']).upper(); entry=float(r['entry']); sl=float(r['sl']); last_px=_safe_px(r['symbol'], entry)
+            R=R_value(entry, sl, side)
+            if R<=0 or len(ks)==0: continue
+            # nombre d'ajouts déjà faits (par design: on ne marque pas un palier 2 tant que 1 pas fait)
+            nb_done=len(done)
+            if nb_done>=len(ks): 
+                st.caption(f"{r['symbol']} · {side} — scale-in: tous les paliers faits.")
+                continue
+            k=ks[nb_done]; frac=fr[min(nb_done, len(fr)-1)] if len(fr)>0 else 0.0
+            # condition de déclenchement (mouvement favorable ≥ k*R)
+            favorable = (last_px-entry) if side=="LONG" else (entry-last_px)
+            triggered = favorable >= (k*R - 1e-12)
+            # quantité à ajouter (avant plafonds)
+            add_qty_raw = base_qty*float(frac)
+            # preview plafonds
+            entry_add = last_px  # on ajoute au prix du marché (sécurisé)
+            notional_add = add_qty_raw * entry_add
+            # limites cap
+            _, engaged_notional2, cap_gross2, room2, per_trade_cap2 = caps_snapshot_global(m)
+            cap_cluster_abs2 = cap_gross2*(cluster_cap_pct/100.0)
+            cl = symbol_cluster(r['symbol']); cluster_now = current_cluster_expo().get(cl, 0.0)
+            # notional actuel de ce trade
+            notional_trade_now = float(r['entry']*r['qty'])
+            scale=1.0
+            if notional_trade_now + notional_add > per_trade_cap2:
+                scale = min(scale, max(0.0,(per_trade_cap2 - notional_trade_now)) / max(notional_add,1e-9))
+            if notional_add > room2:
+                scale = min(scale, room2 / max(notional_add,1e-9))
+            if cluster_now + notional_add > cap_cluster_abs2:
+                leftover = max(0.0, cap_cluster_abs2 - cluster_now)
+                scale = min(scale, leftover / max(notional_add,1e-9))
+            add_qty_eff = max(0.0, add_qty_raw*scale)
+
+            cols = st.columns([3,1,1])
+            cols[0].markdown(f"**{r['symbol']}** · {side} · R={R:.6f} · palier **{k}R** · cible prix≈`{entry + (k*R if side=='LONG' else -k*R):.6f}` · now `{last_px:.6f}`  \nPrévu add: qty `{add_qty_eff:.6f}` (raw `{add_qty_raw:.6f}`) · cap/trade left `{max(0.0, per_trade_cap2 - notional_trade_now):.2f}` · room `{room2:.2f}`")
+            if cols[1].button("➕ Scale-in", key=f"si_{r['id']}", disabled=not triggered or add_qty_eff<=0 or kill_active):
+                add_to_position(int(r['id']), last_px, add_qty_eff, why=f"SCALE_IN_{k}R")
+                st.success(f"{r['symbol']}: scale-in {k}R exécuté ({add_qty_eff:.6f} @ {last_px:.6f})")
+                st.rerun()
+            cols[2].markdown("✅ Prêt" if triggered else "⏳ Attente")
+
+        # ===== Actions rapides & fermetures =====
         st.markdown("### Actions rapides + Fermeture personnalisée")
         for _, r in open_df.iterrows():
             c = st.columns([3,1.1,1.1,1.1,1.3])
             c[0].markdown(f"**{r['symbol']}** · {r['side']} · qty `{float(r['qty']):.4f}` · SL `{float(r['sl']):.6f}`")
-            if c[1].button("SL→BE", key=f"be_{r['id']}"):
-                update_sl(int(r["id"]), float(r["entry"])); st.rerun()
-            if c[2].button("−25%", key=f"m25_{r['id']}"):
-                px = _safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, float(r['qty']) * 0.25, "MANUAL_25"); st.rerun()
-            if c[3].button("−50%", key=f"m50_{r['id']}"):
-                px = _safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, float(r['qty']) * 0.50, "MANUAL_50"); st.rerun()
-            if c[4].button("Fermer 100%", key=f"m100_{r['id']}"):
-                px = _safe_px(r['symbol'], r['entry']); close_position(int(r['id']), px, "MANUAL_CLOSE"); st.rerun()
+            if c[1].button("SL→BE", key=f"be_{r['id']}"): update_sl(int(r["id"]), float(r["entry"])); st.rerun()
+            if c[2].button("−25%", key=f"m25_{r['id']}"): px=_safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, float(r['qty'])*0.25, "MANUAL_25"); st.rerun()
+            if c[3].button("−50%", key=f"m50_{r['id']}"): px=_safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, float(r['qty'])*0.50, "MANUAL_50"); st.rerun()
+            if c[4].button("Fermer 100%", key=f"m100_{r['id']}"): px=_safe_px(r['symbol'], r['entry']); close_position(int(r['id']), px, "MANUAL_CLOSE"); st.rerun()
 
             c2 = st.columns([2.2,0.9,1.8,0.9])
-            pct_key = f"pct_close_{r['id']}"
-            pct_val = c2[0].slider(f"% à fermer · {r['symbol']}", 0.0, 100.0, 0.0, 5.0, key=pct_key)
+            pct_key=f"pct_close_{r['id']}"; pct_val=c2[0].slider(f"% à fermer · {r['symbol']}", 0.0, 100.0, 0.0, 5.0, key=pct_key)
             if c2[1].button("Fermer %", key=f"btn_pct_{r['id']}"):
-                q = float(r['qty']) * float(pct_val) / 100.0
-                if q > 0:
-                    px = _safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, q, f"MANUAL_{int(pct_val)}pct"); st.rerun()
-                else:
-                    st.warning("Pourcentage = 0% — rien à faire.")
-
-            qty_key = f"qty_close_{r['id']}"
-            max_q = float(r['qty']); step_q = max(max_q/20.0, 1e-6)
-            qty_val = c2[2].number_input(f"Qty à fermer · {r['symbol']}", min_value=0.0, max_value=max_q, value=0.0, step=step_q, key=qty_key, format="%.8f")
+                q=float(r['qty'])*float(pct_val)/100.0
+                if q>0: px=_safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, q, f"MANUAL_{int(pct_val)}pct"); st.rerun()
+                else: st.warning("Pourcentage = 0% — rien à faire.")
+            qty_key=f"qty_close_{r['id']}"; max_q=float(r['qty']); step_q=max(max_q/20.0, 1e-6)
+            qty_val=c2[2].number_input(f"Qty à fermer · {r['symbol']}", min_value=0.0, max_value=max_q, value=0.0, step=step_q, key=qty_key, format="%.8f")
             if c2[3].button("Fermer qty", key=f"btn_qty_{r['id']}"):
-                q = min(float(qty_val), max_q)
-                if q > 0:
-                    px = _safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, q, "MANUAL_QTY"); st.rerun()
-                else:
-                    st.warning("Quantité = 0 — rien à faire.")
+                q=min(float(qty_val), max_q)
+                if q>0: px=_safe_px(r['symbol'], r['entry']); partial_close(int(r['id']), px, q, "MANUAL_QTY"); st.rerun()
+                else: st.warning("Quantité = 0 — rien à faire.")
 
-# ───────── 3) Historique
+# ───────────────────────── 3) Historique
 with tabs[2]:
     st.subheader("Historique (clôturées)")
     hist=list_positions(status='CLOSED')
-    if hist.empty:
-        st.info("Pas encore d’historique.")
+    if hist.empty: st.info("Pas encore d’historique.")
     else:
         def _mode_from_note(n):
             if isinstance(n,str) and n.startswith("META2:"):
@@ -1121,10 +1127,8 @@ with tabs[2]:
         avgloss=float(hist.loc[hist['pnl']<=0,'pnl'].mean()) if (total-wins)>0 else 0.0
         pf=(avgwin/abs(avgloss)) if avgloss<0 else np.nan
         c1,c2,c3,c4=st.columns(4)
-        c1.metric("P&L réalisé", f"{pnl:.2f}")
-        c2.metric("Win rate", f"{winrate:.1f}%")
-        c3.metric("Profit factor", f"{pf:.2f}" if not np.isnan(pf) else "—")
-        c4.metric("Avg win/loss", f"{avgwin:.2f} / {avgloss:.2f}")
+        c1.metric("P&L réalisé", f"{pnl:.2f}"); c2.metric("Win rate", f"{winrate:.1f}%")
+        c3.metric("Profit factor", f"{pf:.2f}" if not np.isnan(pf) else "—"); c4.metric("Avg win/loss", f"{avgwin:.2f} / {avgloss:.2f}")
 
         st.markdown("#### Perf par mode")
         def agg(dfm):
@@ -1136,12 +1140,11 @@ with tabs[2]:
         bymode=hist.groupby("mode",dropna=False).apply(agg).reset_index()
         st.dataframe(bymode.sort_values("pnl_sum",ascending=False).round(3), use_container_width=True)
 
-# ───────── 4) Analyse
+# ───────────────────────── 4) Analyse
 with tabs[3]:
     st.subheader("📊 Analyse")
     hist=list_positions(status='CLOSED')
-    if hist.empty:
-        st.info("Pas de données.")
+    if hist.empty: st.info("Pas de données.")
     else:
         def _mode(n):
             try:
@@ -1156,7 +1159,7 @@ with tabs[3]:
         st.markdown("#### Equity curve (réalisé) par MODE")
         st.line_chart(pd.DataFrame({mo:pd.Series(vals) for mo,vals in curves.items()}))
 
-# ───────── 5) Lab
+# ───────────────────────── 5) Lab
 with tabs[4]:
     st.subheader("Lab — Backtest rapide")
     sym_b=st.selectbox("Symbole", SYMBOLS_DEFAULT, index=0, key="lab_sym")
