@@ -712,47 +712,73 @@ with tabs[0]:
     if 'scan_conf' not in st.session_state: st.session_state.scan_conf = {}
 
     # ---------- SCAN ----------
-    if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_active):
-        if kill_active: st.stop()
-        rows=[]; tops={}; confs={}
-        for sym in symbols:
-            try:
-                df  = load_or_fetch(exchange, sym, tf, 1200)
-                dfH = load_or_fetch(exchange, sym, htf, 600)
-            except Exception as e:
-                st.warning(f"Skip {sym}: {e}"); continue
+if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_active):
+    if kill_active:
+        st.stop()
 
-            signals={nm: fn(df) for nm,fn in STRATS.items()}
-            w = ensemble_weights(df, signals, window=300)
-            sig = blended_signal(signals, w)
-            gate = htf_gate(df, dfH)
-            blended = (sig*gate).clip(-1,1)*mm
-            if abs(float(blended.iloc[-1])) < m['gate_thr']: continue
+    rows = []
+    for sym in symbols:
+        try:
+            df  = load_or_fetch(exchange, sym, tf, 1200)
+            dfH = load_or_fetch(exchange, sym, htf, 600)
+        except Exception as e:
+            st.warning(f"Skip {sym}: {e}")
+            continue
 
-            d = int(np.sign(blended.iloc[-1])); 
-            if d==0: continue
-            lvl = atr_levels(df, d, sl_mult, tp_mult)
-            if not lvl: continue
-            r_r = rr(lvl['entry'], lvl['sl'], lvl['tp'])
-            if r_r < m['min_rr']: continue
+        signals = {nm: fn(df) for nm, fn in STRATS.items()}
+        w = ensemble_weights(df, signals, window=300)
+        sig = blended_signal(signals, w)
+        gate = htf_gate(df, dfH)
 
-            qty0 = size_fixed_pct(eq, lvl['entry'], lvl['sl'], m['risk_pct'])
-            if qty0 <= 0: continue
-            tps = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d>0 else 'SHORT', m['tpR'])
+        blended = (sig * gate).clip(-1, 1) * mm
+        if abs(float(blended.iloc[-1])) < m['gate_thr']:
+            continue
 
-            rows.append({
-                'symbol':sym,'dir':'LONG' if d>0 else 'SHORT',
-                'entry':lvl['entry'],'sl':lvl['sl'],'tp':lvl['tp'],
-                'tp1':tps[0],'tp2':tps[1],'tp3':tps[2],
-                'rr':r_r,'qty':qty0,'pct_cap':0.0,
-                'confidence': float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum()),
-            })
-            tops[len(rows)-1]  = [(k,float(v)) for k,v in w.sort_values(ascending=False).head(5).items()]
-            confs[len(rows)-1] = rows[-1]['confidence']
+        d = int(np.sign(blended.iloc[-1]))
+        if d == 0:
+            continue
 
-        st.session_state.scan_df   = pd.DataFrame(rows).sort_values(['confidence','rr'],ascending=False).head(int(m['max_positions'])).reset_index(drop=True)
-        st.session_state.scan_top  = {i: tops.get(i, []) for i in range(len(st.session_state.scan_df))}
-        st.session_state.scan_conf = {i: confs.get(i, 0.0) for i in range(len(st.session_state.scan_df))}
+        lvl = atr_levels(df, d, sl_mult, tp_mult)
+        if not lvl:
+            continue
+
+        r_r = rr(lvl['entry'], lvl['sl'], lvl['tp'])
+        if r_r < m['min_rr']:
+            continue
+
+        qty0 = size_fixed_pct(eq, lvl['entry'], lvl['sl'], m['risk_pct'])
+        if qty0 <= 0:
+            continue
+
+        tps  = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d > 0 else 'SHORT', m['tpR'])
+        top5 = [(k, float(v)) for k, v in w.sort_values(ascending=False).head(5).items()]
+        conf = float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum())
+
+        rows.append({
+            'symbol': sym, 'dir': 'LONG' if d > 0 else 'SHORT',
+            'entry': lvl['entry'], 'sl': lvl['sl'], 'tp': lvl['tp'],
+            'tp1': tps[0], 'tp2': tps[1], 'tp3': tps[2],
+            'rr': r_r, 'qty': qty0, 'pct_cap': 0.0,
+            'confidence': conf, 'top_strats': top5
+        })
+
+    # IMPORTANT: on force les colonnes même si `rows` est vide → pas de KeyError au tri
+    cols = ['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence','top_strats']
+    dfp = pd.DataFrame(rows, columns=cols)
+
+    if dfp.empty:
+        st.session_state.scan_df   = dfp
+        st.session_state.scan_top  = {}
+        st.session_state.scan_conf = {}
+        st.info("Aucun setup éligible trouvé au scan (seuil/gate trop stricts ?).")
+    else:
+        dfp = dfp.sort_values(['confidence','rr'], ascending=False)\
+                 .head(int(m['max_positions'])).reset_index(drop=True)
+
+        st.session_state.scan_df = dfp
+        # re-map après tri pour que les indices UI correspondent
+        st.session_state.scan_top  = {i: dfp.loc[i, 'top_strats'] for i in range(len(dfp))}
+        st.session_state.scan_conf = {i: float(dfp.loc[i, 'confidence']) for i in range(len(dfp))}
         st.rerun()
 
     # ---------- AFFICHAGE / ACTION ----------
