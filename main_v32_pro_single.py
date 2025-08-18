@@ -717,6 +717,8 @@ if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_
         st.stop()
 
     rows = []
+    debug = []  # diagnostic par symbole
+
     for sym in symbols:
         try:
             df  = load_or_fetch(exchange, sym, tf, 1200)
@@ -726,60 +728,81 @@ if st.button("🚀 Scanner maintenant", use_container_width=True, disabled=kill_
             continue
 
         signals = {nm: fn(df) for nm, fn in STRATS.items()}
-        w = ensemble_weights(df, signals, window=300)
+        w   = ensemble_weights(df, signals, window=300)
         sig = blended_signal(signals, w)
         gate = htf_gate(df, dfH)
 
-        blended = (sig * gate).clip(-1, 1) * mm
-        if abs(float(blended.iloc[-1])) < m['gate_thr']:
+        last_sig  = float(sig.iloc[-1])
+        last_gate = float(gate.iloc[-1])
+        blended   = float((sig * gate).clip(-1,1).iloc[-1] * mm)
+        pass_gate = abs(blended) >= m['gate_thr']
+
+        d = int(np.sign(blended)) if pass_gate else 0
+        lvl = atr_levels(df, d, sl_mult, tp_mult) if d != 0 else None
+        r_r = rr(lvl['entry'], lvl['sl'], lvl['tp']) if lvl else np.nan
+        pass_rr = (r_r >= m['min_rr']) if lvl else False
+
+        qty0 = size_fixed_pct(portfolio_equity(float(kv_get('base_capital',1000.0))),
+                              lvl['entry'] if lvl else 1, lvl['sl'] if lvl else 0, m['risk_pct']) if lvl else 0.0
+        pass_qty = qty0 > 0
+
+        debug.append(dict(
+            symbol=sym, sig=round(last_sig,4), gate=last_gate, blended=round(blended,4),
+            pass_gate=pass_gate, rr=round(r_r,3) if lvl else None, pass_rr=pass_rr,
+            qty0=qty0, pass_qty=pass_qty
+        ))
+
+        if not (pass_gate and pass_rr and pass_qty):
             continue
 
-        d = int(np.sign(blended.iloc[-1]))
-        if d == 0:
-            continue
-
-        lvl = atr_levels(df, d, sl_mult, tp_mult)
-        if not lvl:
-            continue
-
-        r_r = rr(lvl['entry'], lvl['sl'], lvl['tp'])
-        if r_r < m['min_rr']:
-            continue
-
-        qty0 = size_fixed_pct(eq, lvl['entry'], lvl['sl'], m['risk_pct'])
-        if qty0 <= 0:
-            continue
-
-        tps  = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d > 0 else 'SHORT', m['tpR'])
+        tps  = r_targets(lvl['entry'], lvl['sl'], 'LONG' if d>0 else 'SHORT', m['tpR'])
         top5 = [(k, float(v)) for k, v in w.sort_values(ascending=False).head(5).items()]
-        conf = float(abs(sig.iloc[-1]) * w.sort_values(ascending=False).head(3).sum())
+        conf = float(abs(last_sig) * w.sort_values(ascending=False).head(3).sum())
 
         rows.append({
-            'symbol': sym, 'dir': 'LONG' if d > 0 else 'SHORT',
+            'symbol': sym, 'dir': 'LONG' if d>0 else 'SHORT',
             'entry': lvl['entry'], 'sl': lvl['sl'], 'tp': lvl['tp'],
             'tp1': tps[0], 'tp2': tps[1], 'tp3': tps[2],
             'rr': r_r, 'qty': qty0, 'pct_cap': 0.0,
             'confidence': conf, 'top_strats': top5
         })
 
-    # IMPORTANT: on force les colonnes même si `rows` est vide → pas de KeyError au tri
     cols = ['symbol','dir','entry','sl','tp','tp1','tp2','tp3','rr','qty','pct_cap','confidence','top_strats']
     dfp = pd.DataFrame(rows, columns=cols)
 
+    # Sauvegarde état + diagnostic dans la session
+    st.session_state.scan_debug = pd.DataFrame(debug)
     if dfp.empty:
         st.session_state.scan_df   = dfp
         st.session_state.scan_top  = {}
         st.session_state.scan_conf = {}
-        st.info("Aucun setup éligible trouvé au scan (seuil/gate trop stricts ?).")
+        st.session_state.scan_msg  = "Aucun setup éligible avec les seuils actuels."
     else:
         dfp = dfp.sort_values(['confidence','rr'], ascending=False)\
                  .head(int(m['max_positions'])).reset_index(drop=True)
+        st.session_state.scan_df   = dfp
+        st.session_state.scan_top  = {i: dfp.loc[i,'top_strats'] for i in range(len(dfp))}
+        st.session_state.scan_conf = {i: float(dfp.loc[i,'confidence']) for i in range(len(dfp))}
+        st.session_state.scan_msg  = None
+    st.rerun()
 
-        st.session_state.scan_df = dfp
-        # re-map après tri pour que les indices UI correspondent
-        st.session_state.scan_top  = {i: dfp.loc[i, 'top_strats'] for i in range(len(dfp))}
-        st.session_state.scan_conf = {i: float(dfp.loc[i, 'confidence']) for i in range(len(dfp))}
-        st.rerun()
+# Affiche un message si le dernier scan n’a rien trouvé
+if st.session_state.get('scan_msg'):
+    st.warning(st.session_state['scan_msg'])
+    with st.expander("Pourquoi 0 trade ? (diagnostic du scan)"):
+        dbg = st.session_state.get('scan_debug', pd.DataFrame())
+        if dbg is None or dbg.empty:
+            st.caption("Pas de données de diagnostic.")
+        else:
+            st.dataframe(dbg, use_container_width=True)
+            n = len(dbg)
+            st.caption(
+                f"{n} symboles scannés • "
+                f"Pass gate: {(dbg['pass_gate']).sum()}/{n} • "
+                f"Pass R/R: {(dbg['pass_rr']).sum()}/{n} • "
+                f"Pass sizing: {(dbg['pass_qty']).sum()}/{n}"
+            )
+            st.info("Astuce: baisse `gate_thr` ou `min_rr`, coupe la macro (VIX), ou passe en mode plus agressif pour tester.")
 
     # ---------- AFFICHAGE / ACTION ----------
     picks = st.session_state.scan_df
