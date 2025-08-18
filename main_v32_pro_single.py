@@ -418,46 +418,36 @@ def yf_series(ticker: str, period="5y"):
         return None
 
 def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
-    if not enable: return 1.0, "macro OFF"
-    vix=yf_series("^VIX"); gold=yf_series("GC=F")
-    if vix is None or vix.empty: return 1.0, "no_vix"
-    lvl=float(vix.iloc[-1]); mult=1.0; note=[]
-    if lvl>vix_riskoff: mult=0.0; note.append("risk-off")
-    elif lvl>vix_caution: mult=0.5; note.append("caution")
-    else: note.append("benign")
-    def macro_gate(enable, vix_caution=20.0, vix_riskoff=28.0, gold_mom_thr=0.10):
     if not enable:
         return 1.0, "macro OFF"
 
     vix  = yf_series("^VIX")
     gold = yf_series("GC=F")
 
+    # si VIX indispo → pas de filtre macro
     if vix is None or vix.empty:
         return 1.0, "no_vix"
 
-    lvl  = float(vix.iloc[-1])
-    mult = 1.0
-    note = []
+    lvl   = float(vix.iloc[-1])
+    mult  = 1.0
+    notes = []
 
     if lvl > vix_riskoff:
-        mult = 0.0; note.append("risk-off")
+        mult = 0.0; notes.append("risk-off")
     elif lvl > vix_caution:
-        mult = 0.5; note.append("caution")
+        mult = 0.5; notes.append("caution")
     else:
-        note.append("benign")
+        notes.append("benign")
 
     if gold is not None and not gold.empty:
         mom = float(gold.pct_change(63).iloc[-1])
         if mom > gold_mom_thr:
             mult *= 0.8
-            note.append("gold↑")
+            notes.append("gold↑")
 
-    return mult, " | ".join(note)
-    # (version robuste sans walrus:)
-    if gold is not None and not gold.empty:
-        mom=float(gold.pct_change(63).iloc[-1])
-        if mom>gold_mom_thr: mult*=0.8; note.append("gold↑")
-    return mult," | ".join(note)
+    # garde-fou
+    mult = float(min(1.0, max(0.0, mult)))
+    return mult, " | ".join(notes)
 
 # ───────── Risk & sizing
 def rr(entry, sl, tp): R=abs(entry-sl); return float(abs(tp-entry)/(R if R>0 else 1e-9))
